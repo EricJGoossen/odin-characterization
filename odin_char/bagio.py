@@ -63,10 +63,44 @@ class BagData:
             f"tf {parent}->{child} not found in {self.path}. Available: {self.tf_pairs()}"
         )
 
+    mocap_clock: str = "host"  # "server": mocap stamps come from the mocap server's clock
+    mocap_clock_model: dict = field(default_factory=dict)
+
     def mocap_series(self) -> PoseSeries:
+        """Mocap poses on the host clock.
+
+        With mocap_clock == "server" the stamps are mapped to the host clock with a per-bag
+        offset + drift model fitted to the lower envelope of (arrival - stamp): the minimum
+        network delay is (nearly) constant, so the envelope tracks the clock offset. The leftover
+        constant (minimum delay) is absorbed by the Phase 1 IMU/mocap time offset."""
         if len(self.mocap.t_stamp) < 2:
             raise KeyError(f"no mocap data in {self.path}")
-        return self.mocap.series(False)
+        s = self.mocap.series(False)
+        if self.mocap_clock != "server":
+            return s
+        a, b, t0 = self.fit_mocap_clock()
+        return PoseSeries(s.t + a + b * (s.t - t0), s.pose)
+
+    def fit_mocap_clock(self, window_s: float = 5.0) -> tuple[float, float, float]:
+        ts = np.asarray(self.mocap.t_stamp)
+        d = np.asarray(self.mocap.t_recv) - ts
+        t0 = float(ts[0])
+        w = np.floor((ts - t0) / window_s).astype(int)
+        idx = [np.where(w == k)[0] for k in np.unique(w)]
+        mins = np.array([[ts[i[np.argmin(d[i])]] - t0, d[i].min()] for i in idx if len(i)])
+        if len(mins) >= 3:
+            b, a = np.polyfit(mins[:, 0], mins[:, 1], 1)
+            # one robust pass: drop windows whose minimum sits well above the line (congestion)
+            r = mins[:, 1] - (a + b * mins[:, 0])
+            keep = r < np.median(r) + 3 * (np.median(np.abs(r - np.median(r))) * 1.4826 + 1e-4)
+            b, a = np.polyfit(mins[keep, 0], mins[keep, 1], 1)
+        else:
+            a, b = float(d.min()), 0.0
+        resid = d - (a + b * (ts - t0))
+        self.mocap_clock_model = {"offset_s": float(a), "drift_ppm": float(b * 1e6),
+                                  "delay_median_ms": float(np.median(resid) * 1e3),
+                                  "delay_p99_ms": float(np.percentile(resid, 99) * 1e3)}
+        return float(a), float(b), t0
 
 
 def _xyz(v):
@@ -120,6 +154,7 @@ def read_bag(path: str | Path, cfg: dict) -> BagData:
     roi = cfg.get("preflight", {}).get("wall_roi")
 
     data = BagData(path=str(path))
+    data.mocap_clock = frames.get("mocap_clock", "host")
     typestore = get_typestore(Stores.LATEST)
     with AnyReader([Path(path)], default_typestore=typestore) as reader:
         data.topics = {c.topic: c.msgtype for c in reader.connections}

@@ -52,6 +52,8 @@ def validate(model: Tier0Model, held: ErrorTable, n_mc: int = 50, real_lost_even
              seed: int = 0, acf_tau_multiple: float = 5.0, band=(5, 95)) -> ValidationResult:
     rng = np.random.default_rng(seed)
     dt = model.dt
+    # rank tests need enough realisations to be able to reach the per-axis level at all
+    n_mc = max(n_mc, int(np.ceil(3 / ((100 - band[1] + band[0]) / 100 / 6))))
     segs = held.segments(dt)
     idx = np.concatenate(segs) if segs else np.zeros(0, int)
     real = held.err
@@ -74,66 +76,77 @@ def validate(model: Tier0Model, held: ErrorTable, n_mc: int = 50, real_lost_even
         for a in range(6):
             pooled[a].append(sim[idx, a][::10])
     sims_rmse, sims_acf, sims_rpe, sims_q = map(np.array, (sims_rmse, sims_acf, sims_rpe, sims_q))
-    sims_rmse, sims_acf, sims_rpe, sims_q = map(np.array, (sims_rmse, sims_acf, sims_rpe, sims_q))
     lo, hi = band
-    # The protocol's per-axis 5-95% band is reported as-is. The overall verdict widens it for the
-    # six axes tested at once (family-wise 90%), otherwise a perfect model would fail most of the
-    # time just by chance.
-    fw = (100 - hi + lo) / 2 / 6
-    flo, fhi = fw, 100 - fw
+    # The protocol's per-axis 5-95% bands are reported as-is. The verdict uses rank tests of the
+    # real data among the Monte Carlo realisations (exchangeable under a correct model, so the
+    # p-values are exact): a global-envelope max-deviation statistic for curves (ACF, QQ, RPE),
+    # whose neighbouring points are strongly correlated, and a two-sided rank for scalars. The
+    # level is family-wise over the six axes.
+    alpha = (100 - hi + lo) / 100  # 0.10
+    alpha_axis = alpha / 6
 
     def band_of(x, a, b):
         return np.nanpercentile(x, a, 0), np.nanpercentile(x, b, 0)
 
-    metrics: dict = {"band_percentiles": [lo, hi], "decision_band_percentiles": [flo, fhi]}
+    def rank_p_scalar(real_v, sims_v):
+        # two-sided, normal approximation of the simulated distribution (RMSE over thousands of
+        # samples is close to normal); continuous, so it works with any number of realisations
+        sd = float(np.std(sims_v)) + 1e-15
+        return float(2 * stats.norm.sf(abs(real_v - float(np.mean(sims_v))) / sd))
+
+    def rank_p_curve(real_c, sims_c):
+        mu = np.nanmean(sims_c, 0)
+        sd = np.nanstd(sims_c, 0) + 1e-12
+        T = lambda c: np.nanmax(np.abs(c - mu) / sd)
+        t_real = T(real_c)
+        t_sims = np.array([T(s) for s in sims_c])
+        return float((1 + np.sum(t_sims >= t_real)) / (len(sims_c) + 1))
+
+    metrics: dict = {"band_percentiles": [lo, hi], "alpha_family": alpha, "alpha_per_axis": alpha_axis}
     failing = []
     # RMSE
     r_lo, r_hi = band_of(sims_rmse, lo, hi)
-    d_lo, d_hi = band_of(sims_rmse, flo, fhi)
-    ok = (real_rmse >= d_lo) & (real_rmse <= d_hi)
-    metrics["rmse"] = {a: {"real": float(real_rmse[i]), "sim_band": [float(r_lo[i]), float(r_hi[i])],
-                           "inside_5_95": bool(r_lo[i] <= real_rmse[i] <= r_hi[i]), "pass": bool(ok[i])}
-                       for i, a in enumerate(AXES)}
-    if not ok.all():
+    metrics["rmse"] = {}
+    for i, a in enumerate(AXES):
+        p = rank_p_scalar(real_rmse[i], sims_rmse[:, i])
+        metrics["rmse"][a] = {"real": float(real_rmse[i]), "sim_band": [float(r_lo[i]), float(r_hi[i])],
+                              "inside_5_95": bool(r_lo[i] <= real_rmse[i] <= r_hi[i]), "p": p, "pass": p > alpha_axis}
+    if not all(v["pass"] for v in metrics["rmse"].values()):
         failing.append("rmse")
     # CDF / QQ
     real_q = np.quantile(real[idx], qs, axis=0)
     q_lo, q_hi = band_of(sims_q, lo, hi)
-    dq_lo, dq_hi = band_of(sims_q, flo, fhi)
-    cdf_ok = []
     metrics["cdf"] = {}
     for i, a in enumerate(AXES):
         inside = np.mean((real_q[:, i] >= q_lo[:, i]) & (real_q[:, i] <= q_hi[:, i]))
-        inside_d = np.mean((real_q[:, i] >= dq_lo[:, i]) & (real_q[:, i] <= dq_hi[:, i]))
         ks = stats.ks_2samp(real[idx, i][::10], np.concatenate(pooled[i]))
-        cdf_ok.append(inside_d >= 0.8)
-        metrics["cdf"][a] = {"quantiles_inside_5_95": float(inside), "quantiles_inside_decision_band": float(inside_d),
-                             "ks_p": float(ks.pvalue), "pass": bool(inside_d >= 0.8)}
-    if not all(cdf_ok):
+        p = rank_p_curve(real_q[:, i], sims_q[:, :, i])
+        metrics["cdf"][a] = {"quantiles_inside_5_95": float(inside), "ks_p": float(ks.pvalue), "p": p, "pass": p > alpha_axis}
+    if not all(v["pass"] for v in metrics["cdf"].values()):
         failing.append("cdf")
-    # ACF
+    # ACF (lag 0 is always 1: excluded from the statistic)
     a_lo, a_hi = band_of(sims_acf, lo, hi)
-    da_lo, da_hi = band_of(sims_acf, flo, fhi)
     inside = np.mean((real_acf >= a_lo - 1e-9) & (real_acf <= a_hi + 1e-9), axis=1)
-    inside_d = np.mean((real_acf >= da_lo - 1e-9) & (real_acf <= da_hi + 1e-9), axis=1)
-    metrics["acf"] = {a: {"fraction_inside_5_95": float(inside[i]), "fraction_inside_decision_band": float(inside_d[i]),
-                          "pass": bool(inside_d[i] >= 0.9)} for i, a in enumerate(AXES)}
-    if not (inside_d >= 0.9).all():
+    metrics["acf"] = {}
+    for i, a in enumerate(AXES):
+        p = rank_p_curve(real_acf[i, 1:], sims_acf[:, i, 1:])
+        metrics["acf"][a] = {"fraction_inside_5_95": float(inside[i]), "p": p, "pass": p > alpha_axis}
+    if not all(v["pass"] for v in metrics["acf"].values()):
         failing.append("acf")
     # RPE
     p_lo, p_hi = band_of(sims_rpe, lo, hi)
-    dp_lo, dp_hi = band_of(sims_rpe, flo, fhi)
     fin = np.isfinite(real_rpe)
-    rpe_ok = bool(np.all((real_rpe[fin] >= dp_lo[fin]) & (real_rpe[fin] <= dp_hi[fin])))
+    p_rpe = rank_p_curve(real_rpe[fin], sims_rpe[:, fin]) if fin.any() else 1.0
     metrics["rpe"] = {"lengths_m": list(RPE_LENGTHS), "real": real_rpe.tolist(), "sim_lo": p_lo.tolist(),
-                      "sim_hi": p_hi.tolist(), "pass": rpe_ok}
-    if not rpe_ok:
+                      "sim_hi": p_hi.tolist(), "inside_5_95": bool(np.all((real_rpe[fin] >= p_lo[fin]) & (real_rpe[fin] <= p_hi[fin]))),
+                      "p": p_rpe, "pass": p_rpe > alpha}
+    if not metrics["rpe"]["pass"]:
         failing.append("rpe")
     # events
     mu = model.lambda_lost * duration
     p_ev = float(min(1.0, 2 * min(stats.poisson.cdf(real_lost_events, mu), stats.poisson.sf(real_lost_events - 1, mu)))) if mu > 0 else (1.0 if real_lost_events == 0 else 0.0)
-    metrics["events"] = {"real_lost": real_lost_events, "expected": mu, "p": p_ev, "pass": p_ev > 0.05}
-    if p_ev <= 0.05:
+    metrics["events"] = {"real_lost": real_lost_events, "expected": mu, "p": p_ev, "pass": p_ev > alpha}
+    if not metrics["events"]["pass"]:
         failing.append("events")
 
     metrics["_curves"] = {"real_acf": real_acf, "acf_lo": a_lo, "acf_hi": a_hi, "qs": qs, "real_q": real_q,

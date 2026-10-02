@@ -315,6 +315,21 @@ def step_latency_check(c: Campaign, calib: Calibration, tau_d: float, out: dict)
     }
 
 
+def refine_cover_times(b: BagData, t_cover: float, t_uncover: float, calib: Calibration) -> tuple[float, float]:
+    """The announced cover/uncover times include the operator's reaction time; when the cloud was
+    recorded, use the frames where Odin's point count collapses instead."""
+    if len(b.cloud_n) < 20:
+        return t_cover, t_uncover
+    t = np.asarray(b.cloud_t) + calib.time_offset
+    n = np.asarray(b.cloud_n, float)
+    win = (t > t_cover - 2.0) & (t < t_uncover + 2.0)
+    low = win & (n < 0.3 * np.median(n))
+    if not low.any():
+        return t_cover, t_uncover
+    period = float(np.median(np.diff(t)))
+    return float(t[low].min()), float(t[low].max() + period)
+
+
 def step_events(c: Campaign, calib: Calibration, model: Tier0Model, out: dict, tracked: list[ErrorTable]):
     res: dict = {}
     trials = []
@@ -374,7 +389,8 @@ def step_events(c: Campaign, calib: Calibration, model: Tier0Model, out: dict, t
         run = c.runs[o["run"]]
         tab = c.errors([run], calib, model.tau_d)
         if len(tab):
-            outs.append(ev.analyze_outage(tab, o["t_cover"], o["t_uncover"], c.map_updates(run, calib)))
+            t0, t1 = refine_cover_times(c.bag(run), o["t_cover"], o["t_uncover"], calib)
+            outs.append(ev.analyze_outage(tab, t0, t1, c.map_updates(run, calib)))
     if outs:
         rr = ev.recovery_rate(outs)
         res["lost_induced"] = rr

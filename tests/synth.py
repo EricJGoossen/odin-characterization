@@ -32,6 +32,8 @@ class Truth:
     tau_c: np.ndarray = field(default_factory=lambda: np.array([1.5, 1.0, 2.0, 0.8, 0.8, 1.2]))
     nu: np.ndarray = field(default_factory=lambda: np.array([4.0, np.inf, np.inf, np.inf, np.inf, 5.0]))
     stationary_scale: float = 0.4
+    mocap_clock_offset: float = -3.71  # mocap server clock minus host clock
+    mocap_clock_drift: float = 30e-6
     rate: float = 10.0
 
 
@@ -162,9 +164,12 @@ def simulate_run(spec: RunSpec, tr: Truth, rng, path: Path, frames: dict):
     for d0 in rng.uniform(tm[0], tm[-1], 3):
         drop |= (tm > d0) & (tm < d0 + 0.05)
     Km, _ = K.interp(tm[~drop])
+    # mocap stamps come from the mocap server's clock (offset + drift); arrival has network jitter
     for ti, i in zip(tm[~drop], range(len(Km))):
         noisy = Pose(Km.R[i], Km.p[i] + rng.normal(0, 0.0003, 3))
-        streams.append((ti + 0.001, 0, "/tf", T["tf2_msgs/msg/TFMessage"](transforms=[_tf(ti, frames["mocap_world"], frames["mocap_body"], noisy)]), "tf2_msgs/msg/TFMessage"))
+        server_t = ti + tr.mocap_clock_offset + tr.mocap_clock_drift * (ti - 1000.0)
+        recv = ti + 0.0008 + rng.exponential(0.002)
+        streams.append((recv, 0, "/tf", T["tf2_msgs/msg/TFMessage"](transforms=[_tf(server_t, frames["mocap_world"], frames["mocap_body"], noisy)]), "tf2_msgs/msg/TFMessage"))
 
     # IMU (200 Hz, Odin clock)
     ti = np.arange(t_true[0] + 0.05, t_true[-1] - 0.05, 1 / 200)

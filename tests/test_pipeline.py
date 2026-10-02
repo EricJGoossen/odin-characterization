@@ -21,7 +21,9 @@ def campaign(tmp_path_factory):
 
 def test_time_offset(campaign):
     _, truth, out = campaign
-    assert out["phase1"]["time_offset_s"] == pytest.approx(truth.time_offset, abs=0.002)
+    # mocap is mapped from the server clock to the host clock; the minimum network delay (0.8 ms)
+    # remains and is absorbed here
+    assert out["phase1"]["time_offset_s"] == pytest.approx(truth.time_offset + 0.0008, abs=0.002)
 
 
 def test_hand_eye(campaign):
@@ -83,18 +85,10 @@ def test_events(campaign):
     assert p5["lost_natural"]["n"] == 0
 
 
-def test_validation_no_gross_failure(campaign):
-    # Data generated from the model itself: distribution, tails, RPE and events must agree. RMSE/ACF
-    # on one held-out session are dominated by deterministic latency/field terms and can miss the
-    # band narrowly by chance, so only near-misses are tolerated there.
+def test_validation_passes(campaign):
+    # data generated from the Tier 0 model itself must pass the hold-out validation
     _, _, out = campaign
-    m = out["phase6"]["metrics"]
-    assert set(out["phase6"]["failing_metrics"]) <= {"rmse", "acf"}
-    for a, v in m["rmse"].items():
-        lo, hi = v["sim_band"]
-        assert lo * 0.97 <= v["real"] <= hi * 1.03, a
-    for a, v in m["acf"].items():
-        assert v["fraction_inside_decision_band"] >= 0.75, a
+    assert out["phase6"]["pass"], out["phase6"]["failing_metrics"]
 
 
 def test_outputs_written(campaign):

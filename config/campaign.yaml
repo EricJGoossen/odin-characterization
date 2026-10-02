@@ -3,11 +3,18 @@
 # (`python -m odin_char.cli inspect <bag>` lists the topics and tf pairs in a bag).
 
 frames:
-  mocap_world: mocap          # parent of the mocap -> base_link transform (ground truth)
-  mocap_body: base_link       # the mocap rigid body (put markers on Odin's bracket)
-  odin_odom: odom             # VERIFY: Odin's odom frame
-  odin_imu: imu               # VERIFY: Odin's imu/body frame (odom -> imu)
-  odin_map: map               # VERIFY: Odin's map frame (odom -> map, Odin convention)
+  mocap_world: mocap          # VERIFY: parent of the mocap -> base_link transform (ground truth)
+  mocap_body: base_link       # the mocap rigid body. Odin rides on turret major, which the MCB
+                              # holds at a fixed chassis yaw during the campaign; markers on Odin's
+                              # bracket (and mocap_body set to that body) are better still.
+  # mocap stamps come from the mocap server's clock: each bag is mapped onto the host clock with
+  # an offset+drift fit to the arrival times. Use "host" if the mocap driver stamps on arrival.
+  mocap_clock: server
+  # Odin frames, from odin_ros_driver (include/host_sdk_sample.h, v0.14.4):
+  #   odom -> imu  (send_odom_baselink_tf), odom -> map (relocalization mode only), imu -> lidar
+  odin_odom: odom
+  odin_imu: imu
+  odin_map: map
   # Odin publishes odom->map with parent=odom, child=map (inverse of ROS map->odom).
   # Only set this true if a driver update switches to the ROS convention (parent=map).
   odom_map_is_ros_convention: false
@@ -48,19 +55,24 @@ room:
 
 # --------------------------------------------------------------------------- Odin driver
 driver:
-  # Commands run on the host with the Odin driver (a shell). {map_mode} is replaced by 1 or 2.
-  launch_cmd: "ros2 launch odin_ros_driver odin1_ros2.launch.py"   # VERIFY
-  control_yaml: ~/odin_ws/src/odin_ros_driver/config/control_command.yaml  # VERIFY
-  map_mode_key: custom_map_mode
+  # The deployed control_command.yaml. It is copied per run (into the run folder, which also
+  # archives it) with `overrides` and the map settings applied; the installed file is not touched.
+  base_config: ~/odin_ws/src/odin_ros_driver/config/control_command.yaml   # VERIFY path
+  # Run the driver node directly (the launch file also starts rviz and demo nodes).
+  run_cmd: "ros2 run odin_ros_driver host_sdk_sample --ros-args -p config_file:={config}"
+  save_map_service: /odin1/save_map            # odin_ros_driver/srv/SaveMap {value: 1}
+  map_saved_text: "Map transfer completed"
   relocalization_success_text: "relocalization success!"
-  # How to save the map after the SLAM mapping run. If null, the operator is prompted.
-  save_map_cmd: null          # VERIFY (e.g. a ros2 service call or param set)
-  map_file: null              # VERIFY: path of the saved map (hashed into the metadata)
-  calib_yaml: null            # path of Odin's calib.yaml (first line = device serial)
-  qos_overrides: ~/odin_ws/src/odin_ros_driver/script/rosbag2_qos.yaml  # ROS2: stops 400 Hz drops
-  extra_yaml_settings:        # applied to control_command.yaml every run
+  calib_yaml: ~/.ros/odin_ros_driver/calib.yaml  # written by the driver; first line = serial
+  qos_overrides: ~/odin_ws/src/odin_ros_driver/script/rosbag2_qos.yaml  # stops 400 Hz IMU drops
+  overrides:                  # applied to the copied config for every run
+    use_host_ros_time: 2      # Odin time aligned to the host clock (protocol Phase 0)
     devstatuslog: 1
-    use_host_ros_time: 2
+    sendodom: 1
+    send_odom_baselink_tf: 1
+    sendimu: 1
+    senddtof: 1
+  connect_timeout_s: 60       # wait this long for the first /odin1/imu message after launch
   warmup_min: 20
 
 # --------------------------------------------------------------------------- phases
@@ -117,7 +129,7 @@ analysis:
   # R^2 only adds noise). false: literal reading of the protocol (keep all axes if any passes).
   static_field_per_axis: true
   t_loglik_threshold: 10
-  mc_realizations: 50
+  mc_realizations: 200        # protocol: 50+; rank tests across 6 axes need >= 180
   # holdout_session: s3      # default: last session
 
 # Optional: CAD / mount geometry for base_link -> Odin IMU ([tx ty tz rx ry rz], rotation vector).
