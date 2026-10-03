@@ -777,8 +777,11 @@ def main():
     cfg = load_config(args.config)
     if (args.dir / "campaign.yaml").exists() and args.config.resolve() != (args.dir / "campaign.yaml").resolve():
         old = yaml.safe_load((args.dir / "campaign.yaml").read_text())
-        if old.get("frames") != cfg.get("frames") or old.get("mocap") != cfg.get("mocap"):
-            sys.exit("frames/mocap differ from the campaign's saved config; use the same config for a campaign")
+        mf = args.dir / "manifest.json"
+        has_runs = mf.exists() and bool(json.loads(mf.read_text()).get("runs"))
+        if has_runs and (old.get("frames") != cfg.get("frames") or old.get("mocap") != cfg.get("mocap")):
+            sys.exit("frames/mocap differ from this campaign's recorded runs; use the same config, "
+                     "or a new --dir for a new campaign")
         shutil.copy(args.dir / "campaign.yaml", args.dir / f"campaign.yaml.{int(time.time())}.bak")
     control = cfg["robot"].get("control", "human")
     if control == "human":
