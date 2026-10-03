@@ -71,10 +71,12 @@ class OdinDriver:
         keys["custom_map_mode"] = int(mode)
         if reloc_map is not None:
             keys["relocalization_map_abs_path"] = str(reloc_map)
-        if map_dest is not None:
-            map_dest.mkdir(parents=True, exist_ok=True)  # lidar_save_map: "must already exist"
-            keys["mapping_result_dest_dir"] = str(map_dest)
-            keys["mapping_result_file_name"] = map_name or "map.bin"
+        # Leave the save location to the driver: with mapping_result_dest_dir / _file_name set,
+        # odin_ros_driver 0.14.4 on the sentry Jetson still targeted "/map_<time>.bin" (unwritable).
+        # Empty keys make it use its default <ws>/src/odin_ros_driver/map/<start time>/ folder;
+        # save_map() reads the real path from the driver log and the campaign copies the file.
+        keys["mapping_result_dest_dir"] = ""
+        keys["mapping_result_file_name"] = ""
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(yaml.safe_dump(base, sort_keys=False))
         return out

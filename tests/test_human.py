@@ -75,6 +75,42 @@ def test_human_day1_and_day2(tmp_path, small_cfg):
     assert np.all(cmd.last == 0)
 
 
+def test_survey_writes_room(tmp_path, small_cfg):
+    import yaml
+
+    from odin_char.robot.campaign import load_config
+
+    root = tmp_path / "c"
+    cmd = FakeCmd()
+    driver = FakeDriver(small_cfg, root)
+    world = World(cmd, driver)
+    c = SimulatedHuman(small_cfg, root, prompts=True, skip_warmup=True, io=(world, cmd, driver, FakeRec()))
+    cfgdir = tmp_path / "config"
+    cfgdir.mkdir()
+    (cfgdir / "campaign.yaml").write_text(yaml.safe_dump(small_cfg))
+    c.config_dir = cfgdir
+    try:
+        # the simulated driver covers the fence area; the survey must find roughly those bounds
+        orig = c.monitor
+
+        def many_samples(*a, **k):
+            for _ in range(30):
+                orig(*a, **k)
+
+        c.monitor = many_samples
+        c.step_survey()
+    finally:
+        c.close()
+    merged = load_config(cfgdir / "campaign.yaml")
+    lo, hi = np.array(merged["room"]["fence_min"]), np.array(merged["room"]["fence_max"])
+    assert np.all(lo < -1.5) and np.all(hi > [1.5, 0.9])
+    assert len(merged["phases"]["phase3"]["locations"]) == 4
+    p2 = merged["phases"]["phase2"]
+    assert p2["half_length"] >= p2["half_width"] > 0 and p2["rotation_deg"] in (0.0, 90.0)
+    for x, y, _ in merged["phases"]["phase3"]["locations"]:
+        assert lo[0] < x < hi[0] and lo[1] < y < hi[1]
+
+
 def test_monitor_feedback_loop(tmp_path, small_cfg):
     root = tmp_path / "c"
     cmd = FakeCmd()

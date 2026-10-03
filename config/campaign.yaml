@@ -12,12 +12,15 @@
 # The tracked body is the robot's mocap rigid body. Odin rides on turret major, which the MCB holds
 # at a fixed chassis yaw during the campaign; a rigid body on Odin's bracket is better still.
 mocap:
-  source: tf                  # VERIFY
-  topic: /tf                  # VERIFY
-  parent_frame: mocap         # VERIFY (tf only)
-  child_frame: base_link      # VERIFY (tf only)
-  # server: stamps come from the mocap server's clock; each bag is mapped onto the host clock with
-  # an offset + drift fit to arrival times. host: the mocap driver stamps on arrival (host clock).
+  # vrpn_mocap_client_node on the lab network: PoseStamped in frame "world", ~360 Hz, best effort
+  # (checked 2026-10-02 with find-mocap; arrival - stamp ~2 ms)
+  source: pose
+  topic: /vrpn_mocap/ARUW_Sentry/pose
+  parent_frame: null          # tf only
+  child_frame: null           # tf only
+  # server: stamps may come from the mocap server's clock; each bag is mapped onto the host clock
+  # with an offset + drift fit to arrival times (harmless when the clocks already agree).
+  # host: the mocap driver stamps on arrival (host clock).
   clock: server
   qos: best_effort            # best_effort | reliable (best_effort also hears reliable publishers)
 

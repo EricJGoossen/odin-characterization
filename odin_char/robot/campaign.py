@@ -705,7 +705,10 @@ class Campaign:
             print(f"\n\n          ######## {text} ########\n", flush=True)
 
     # ------------------------------------------------------------------ main
-    BRINGUP = ["mocap", "odin", "jog"]  # debugging aids, always run, never recorded
+    BRINGUP = ["survey", "mocap", "odin", "jog"]  # set-up / debugging aids, always run, never recorded
+
+    def step_survey(self):
+        raise Abort("survey is driven by hand: run it with robot.control: human")
     STEPS = BRINGUP + ["check", "preflight", "calib", "map", "session", "holds", "latency", "init", "outage"]
     CHAINS = {
         "day1": ["check", "preflight", "calib", "map", "session", "holds", "latency", "init", "outage"],
@@ -749,6 +752,19 @@ class Campaign:
                 self.ros.shutdown()
 
 
+def load_config(path: Path) -> dict:
+    """campaign.yaml, overlaid with room.yaml next to it (written by the `survey` step)."""
+    cfg = yaml.safe_load(path.read_text())
+    room = path.parent / "room.yaml"
+    if room.exists():
+        over = yaml.safe_load(room.read_text()) or {}
+        cfg["room"].update(over.get("room", {}))
+        for ph, vals in (over.get("phases") or {}).items():
+            cfg["phases"].setdefault(ph, {}).update(vals)
+        print(f"room/figure-8/hold spots from {room}")
+    return cfg
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("step", choices=Campaign.STEPS + list(Campaign.CHAINS))
@@ -758,7 +774,7 @@ def main():
     ap.add_argument("--skip-warmup", action="store_true", help="skip the warm-up even if driver.warmup_min > 0")
     ap.add_argument("--redo", action="store_true", help="repeat steps already marked done")
     args = ap.parse_args()
-    cfg = yaml.safe_load(args.config.read_text())
+    cfg = load_config(args.config)
     if (args.dir / "campaign.yaml").exists() and args.config.resolve() != (args.dir / "campaign.yaml").resolve():
         old = yaml.safe_load((args.dir / "campaign.yaml").read_text())
         if old.get("frames") != cfg.get("frames") or old.get("mocap") != cfg.get("mocap"):
@@ -773,6 +789,7 @@ def main():
         sys.exit(f"robot.control must be 'human' or 'autonomous', got {control!r}")
     print(f"control: {control}")
     c = cls(cfg, args.dir, prompts=not args.no_prompt, skip_warmup=args.skip_warmup)
+    c.config_dir = args.config.parent  # where `survey` writes room.yaml
     try:
         c.run(args.step, args.redo)
         print("\nstep finished. Analyse with: python -m odin_char.pipeline", args.dir)

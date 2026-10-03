@@ -165,6 +165,70 @@ class HumanCampaign(Campaign):
         pass  # nothing is commanded in human mode
 
     # ------------------------------------------------------------------ steps
+    def step_survey(self):
+        """Drive around the edge of the usable floor; derive the fence, home, figure-8 and hold
+        spots from where the robot actually went, and write them to config/room.yaml."""
+        import yaml
+
+        self.wait_mocap()
+        path: list = []
+
+        def track(st):
+            p = st["pose"]
+            if p is not None and st["age"] < 0.2:
+                path.append(p.copy())
+
+        def status(st):
+            if not path:
+                return "waiting for mocap"
+            xy = np.array(path)[:, :2]
+            lo, hi = xy.min(0), xy.max(0)
+            return (f"x {lo[0]:+5.2f} .. {hi[0]:+5.2f}   y {lo[1]:+5.2f} .. {hi[1]:+5.2f}   "
+                    f"area {hi[0] - lo[0]:4.1f} x {hi[1] - lo[1]:4.1f} m")
+
+        self.monitor("Room survey: drive slowly all the way around the EDGE of the floor the robot may use "
+                     "(as close to walls/obstacles as you'd let it go during the tests).",
+                     status, min_s=15, track=track)
+        xy = np.array(path)[:, :2]
+        if len(xy) < 50:
+            raise Abort("survey recorded too little mocap data")
+        lo, hi = xy.min(0), xy.max(0)
+        size, centre = hi - lo, (lo + hi) / 2
+        if np.any(size < 2.5):
+            print(f"WARNING: the surveyed area is small ({size[0]:.1f} x {size[1]:.1f} m); figure-8 and holds "
+                  "will be cramped")
+        rot = 0.0 if size[0] >= size[1] else 90.0
+        L, S = size.max(), size.min()
+        half_length = float(max(0.8, L / 2 - 0.7))
+        half_width = float(max(0.4, min(S / 2 - 0.7, 0.6 * half_length)))
+        q = 0.55 * size / 2
+        holds = [[float(centre[0] + sx * q[0]), float(centre[1] + sy * q[1]), float(np.radians(yaw))]
+                 for sx, sy, yaw in ((1, 1, 0), (-1, 1, 90), (-1, -1, 180), (1, -1, -90))]
+        room = {
+            "room": {"fence_min": [float(lo[0]), float(lo[1])], "fence_max": [float(hi[0]), float(hi[1])],
+                     "margin": 0.2, "home": [float(centre[0]), float(centre[1]), 0.0]},
+            "phases": {"phase2": {"center": [float(centre[0]), float(centre[1])], "half_length": half_length,
+                                  "half_width": half_width, "rotation_deg": rot},
+                       "phase3": {"locations": holds}},
+        }
+        out = Path(getattr(self, "config_dir", Path(__file__).parents[2] / "config")) / "room.yaml"
+        out.write_text("# Written by `run_campaign.sh survey` "
+                       f"({time.strftime('%Y-%m-%d %H:%M')}): room bounds from the driven edge,\n"
+                       "# figure-8 and hold spots derived from them. Overrides campaign.yaml. Edit freely.\n"
+                       + yaml.safe_dump(room, sort_keys=False))
+        print(f"\nroom: x {lo[0]:+.2f}..{hi[0]:+.2f}, y {lo[1]:+.2f}..{hi[1]:+.2f} ({size[0]:.1f} x {size[1]:.1f} m)")
+        print(f"figure-8: centre ({centre[0]:+.2f}, {centre[1]:+.2f}), {2 * half_length:.1f} x {2 * half_width:.1f} m, "
+              f"rotated {rot:.0f} deg, one lap ~{self._lap_length_for(centre, half_length, half_width, rot):.1f} m")
+        for i, h in enumerate(holds):
+            print(f"hold {i + 1}: ({h[0]:+.2f}, {h[1]:+.2f}) facing {np.degrees(h[2]):.0f} deg")
+        print(f"written to {out}. Mark the figure-8 with tape: it passes through the centre and reaches "
+              f"{half_length:.1f} m either side along the {'x' if rot == 0 else 'y'} axis.")
+
+    @staticmethod
+    def _lap_length_for(centre, half_length, half_width, rot_deg) -> float:
+        xy = figure8_path(centre, half_length, half_width, np.radians(rot_deg), 1)
+        return float(np.sum(np.linalg.norm(np.diff(xy, axis=0), axis=1)))
+
     def step_check(self):
         self.wait_mocap()
         pose = self.ros.mocap()[0]
