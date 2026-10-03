@@ -68,7 +68,9 @@ class Campaign:
         self.min_bin = a.get("static_field_min_samples", 5)
 
     def runs_of(self, phase: str) -> list[dict]:
-        return [r for r in self.manifest["runs"] if r["phase"] == phase]
+        # runs marked "excluded" (e.g. an abandoned session) stay in the manifest for the record;
+        # their driver start can still be an INIT trial (looked up via self.runs)
+        return [r for r in self.manifest["runs"] if r["phase"] == phase and not r.get("excluded")]
 
     def bag(self, run: dict) -> BagData:
         c = self.cache / f"run{run['id']}.pkl"
