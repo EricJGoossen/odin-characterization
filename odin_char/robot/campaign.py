@@ -748,8 +748,11 @@ class Campaign:
             try:
                 self.rec.stop()
             finally:
-                self.driver.stop()
-                self.ros.shutdown()
+                try:
+                    self.driver.stop()
+                    self.driver.restore_config()  # the user's control_command.yaml back in place
+                finally:
+                    self.ros.shutdown()
 
 
 def load_config(path: Path) -> dict:

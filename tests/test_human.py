@@ -1,6 +1,7 @@
 """Human-driven campaign: orchestration with a simulated driver, and the live-feedback loop."""
 import json
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -51,12 +52,18 @@ def test_human_day1_and_day2(tmp_path, small_cfg):
     cmd = FakeCmd()
     driver = FakeDriver(small_cfg, root)
     world = World(cmd, driver)
+    installed = Path(small_cfg["driver"]["base_config"])
+    original = installed.read_text()
     c = SimulatedHuman(small_cfg, root, prompts=True, skip_warmup=True, io=(world, cmd, driver, FakeRec()))
     try:
         c.run("day1", redo=False)
         c.run("day2", redo=False)
     finally:
         c.close()
+    # the driver reads the installed control_command.yaml: ours during runs, the user's after exit
+    assert installed.read_text() == original
+    assert not driver.original_backup.exists()
+    assert len(list((root / "logs").glob("control_command_*.yaml"))) >= 10
 
     m = json.loads((root / "manifest.json").read_text())
     phases = [r["phase"] for r in m["runs"]]

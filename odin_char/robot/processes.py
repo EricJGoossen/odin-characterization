@@ -63,23 +63,46 @@ class OdinDriver:
     def already_running() -> bool:
         return subprocess.run(["pgrep", "-f", "host_sdk_sample"], capture_output=True).returncode == 0
 
+    # odin_ros_driver (0.14.4) ignores the `config_file` parameter: it always loads
+    # <package source>/config/control_command.yaml (host_sdk_sample.cpp, main()). So each run's config
+    # is written INTO that installed file. The user's original is backed up once and restored by
+    # restore_config() (called when the campaign exits); runs are always built from the original.
+    @property
+    def installed_config(self) -> Path:
+        return expand(self.cfg["base_config"])
+
+    @property
+    def original_backup(self) -> Path:
+        p = self.installed_config
+        return p.with_name(p.name + ".odin_char_original")
+
     def write_config(self, out: Path, mode: int, reloc_map: Path | None = None,
                      map_dest: Path | None = None, map_name: str | None = None) -> Path:
-        base = yaml.safe_load(expand(self.cfg["base_config"]).read_text())
+        installed, backup = self.installed_config, self.original_backup
+        if not backup.exists():
+            shutil.copy2(installed, backup)  # the user's own config, restored on exit
+        base = yaml.safe_load(backup.read_text())
         keys = base.setdefault("register_keys", {})
         keys.update(self.cfg.get("overrides", {}))
         keys["custom_map_mode"] = int(mode)
         if reloc_map is not None:
             keys["relocalization_map_abs_path"] = str(reloc_map)
-        # Leave the save location to the driver: with mapping_result_dest_dir / _file_name set,
-        # odin_ros_driver 0.14.4 on the sentry Jetson still targeted "/map_<time>.bin" (unwritable).
-        # Empty keys make it use its default <ws>/src/odin_ros_driver/map/<start time>/ folder;
+        # Let the driver save maps to its default <ws>/src/odin_ros_driver/map/<start time>/ folder;
         # save_map() reads the real path from the driver log and the campaign copies the file.
         keys["mapping_result_dest_dir"] = ""
         keys["mapping_result_file_name"] = ""
+        text = yaml.safe_dump(base, sort_keys=False)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(yaml.safe_dump(base, sort_keys=False))
+        out.write_text(text)  # archived with the run
+        installed.write_text(text)  # what the driver actually reads
         return out
+
+    def restore_config(self):
+        """Put the user's original control_command.yaml back (no-op if nothing was changed)."""
+        backup = self.original_backup
+        if backup.exists():
+            shutil.copy2(backup, self.installed_config)
+            backup.unlink()
 
     def start(self, config_path: Path, log_path: Path, mode: int):
         if self.proc is not None and self.proc.poll() is None:

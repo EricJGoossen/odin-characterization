@@ -46,6 +46,8 @@ class FakeDriver(OdinDriver):
     def start(self, config_path, log_path, mode):
         assert not self._alive
         assert yaml.safe_load(config_path.read_text())["register_keys"]["custom_map_mode"] == mode
+        # what the real driver reads (it ignores config_path)
+        assert yaml.safe_load(self.installed_config.read_text())["register_keys"]["custom_map_mode"] == mode
         self.events, self.mode, self.started_at, self.log_path = {}, mode, time.time(), log_path
         self._alive = True
         self.starts.append(mode)

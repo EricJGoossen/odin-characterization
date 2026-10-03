@@ -81,8 +81,10 @@ room:
 
 # --------------------------------------------------------------------------- Odin driver
 driver:
-  # The deployed control_command.yaml. It is copied per run (into the run folder, which also
-  # archives it) with `overrides` and the map settings applied; the installed file is not touched.
+  # The installed control_command.yaml. odin_ros_driver ignores any config path you pass it and
+  # always reads this file, so each run's config (original + overrides + map mode) is written into
+  # it. The original is backed up as control_command.yaml.odin_char_original and restored when the
+  # campaign exits; every run's config is also archived in <campaign>/logs/.
   base_config: ~/odin_ws/src/odin_ros_driver/config/control_command.yaml   # VERIFY path
   # Run the driver node directly (the launch file also starts rviz and demo nodes).
   run_cmd: "ros2 run odin_ros_driver host_sdk_sample --ros-args -p config_file:={config}"
