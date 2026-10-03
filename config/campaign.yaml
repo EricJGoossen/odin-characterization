@@ -1,15 +1,27 @@
 # Odin1 Tier 0 characterization campaign configuration.
-# Everything marked VERIFY must be checked on the real robot before the first run
-# (`python -m odin_char.cli inspect <bag>` lists the topics and tf pairs in a bag).
+# Everything marked VERIFY must be checked on the real robot before the first run.
+#   scripts/run_campaign.sh find-mocap   lists live mocap candidates (topics, tf pairs, rates)
+#   python -m odin_char.cli inspect <bag> lists the topics and tf pairs in a recorded bag
+
+# --------------------------------------------------------------------------- mocap (ground truth)
+# The mocap system is already running; the campaign only subscribes. Pick ONE source:
+#   tf        a transform parent_frame -> child_frame on `topic` (normally /tf)
+#   pose      geometry_msgs/PoseStamped on `topic`
+#   transform geometry_msgs/TransformStamped on `topic`
+#   odometry  nav_msgs/Odometry on `topic`
+# The tracked body is the robot's mocap rigid body. Odin rides on turret major, which the MCB holds
+# at a fixed chassis yaw during the campaign; a rigid body on Odin's bracket is better still.
+mocap:
+  source: tf                  # VERIFY
+  topic: /tf                  # VERIFY
+  parent_frame: mocap         # VERIFY (tf only)
+  child_frame: base_link      # VERIFY (tf only)
+  # server: stamps come from the mocap server's clock; each bag is mapped onto the host clock with
+  # an offset + drift fit to arrival times. host: the mocap driver stamps on arrival (host clock).
+  clock: server
+  qos: best_effort            # best_effort | reliable (best_effort also hears reliable publishers)
 
 frames:
-  mocap_world: mocap          # VERIFY: parent of the mocap -> base_link transform (ground truth)
-  mocap_body: base_link       # the mocap rigid body. Odin rides on turret major, which the MCB
-                              # holds at a fixed chassis yaw during the campaign; markers on Odin's
-                              # bracket (and mocap_body set to that body) are better still.
-  # mocap stamps come from the mocap server's clock: each bag is mapped onto the host clock with
-  # an offset+drift fit to the arrival times. Use "host" if the mocap driver stamps on arrival.
-  mocap_clock: server
   # Odin frames, from odin_ros_driver (include/host_sdk_sample.h, v0.14.4):
   #   odom -> imu  (send_odom_baselink_tf), odom -> map (relocalization mode only), imu -> lidar
   odin_odom: odom
@@ -19,7 +31,7 @@ frames:
   # Only set this true if a driver update switches to the ROS convention (parent=map).
   odom_map_is_ros_convention: false
 
-topics:
+topics:                       # Odin driver topics (odin_ros_driver v0.14.4)
   tf: /tf
   tf_static: /tf_static
   odometry: /odin1/odometry
@@ -28,8 +40,6 @@ topics:
   cloud: /odin1/cloud_raw
   rosout: /rosout
   markers: null               # optional mocap marker array topic (Phase 0 ghost-marker check)
-  mocap_pose: null            # optional PoseStamped alternative to the mocap tf
-
 # --------------------------------------------------------------------------- robot / room
 robot:
   bridge_host: 127.0.0.1      # where tools/chassis_velocity_bridge.py (project-otto) runs

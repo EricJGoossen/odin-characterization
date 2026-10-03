@@ -2,6 +2,11 @@
 
     python -m odin_char.robot.campaign --config config/campaign.yaml --dir campaigns/odin1 <step>
 
+Bring-up / debugging (nothing recorded; run these first on a new setup):
+    mocap      print the live mocap stream for 10 s (rate, pose, clock offset, fence)
+    odin       start the Odin driver for 20 s and report its topics/tf rates
+    jog        small open-loop pulses; prints how the robot actually moved for each command
+
 Steps (run in this order; `day1` and `day2` chain them):
     check      mocap live, robot inside the fence, bridge moves the robot (command-gain ID)
     preflight  Phase 0 IR interference (prompts to toggle mocap strobes and Odin power)
@@ -10,7 +15,7 @@ Steps (run in this order; `day1` and `day2` chain them):
     session    Phase 2: one session (fresh relocalization start, 10 nominal laps, speed sweep)
     holds      Phase 3: 10 min stationary holds
     latency    Phase 4: sinusoidal translation and yaw
-    init       Phase 5: 24 cold starts at offsets from the mapping start pose
+    init       Phase 5: 24 cold starts at offsets from the mapping path
     outage     Phase 5: covered-sensor outages (needs an operator or a shutter command)
     day1       check, preflight, calib, map, session, holds, latency, init, outage
     day2/day3  check, session        (the protocol wants sessions on different days)
@@ -314,11 +319,86 @@ class Campaign:
             self.state["done"].append(step)
         self.save()
 
+    # ============================================================== bring-up / debugging steps
+    def wait_mocap(self, timeout: float = 5.0):
+        t_end = time.time() + timeout
+        while time.time() < t_end:
+            if self.ros.mocap() is not None:
+                return
+            time.sleep(0.1)
+        m = self.cfg["mocap"]
+        raise Abort(f"no mocap samples within {timeout:.0f} s on {m['topic']} "
+                    f"({m['source']}{', ' + str(m.get('parent_frame')) + ' -> ' + str(m.get('child_frame')) if m['source'] == 'tf' else ''}). "
+                    "Run `scripts/run_campaign.sh find-mocap` and fix the mocap: block in the config.")
+
+    def step_mocap(self, seconds: float = 10.0):
+        """Print the live mocap stream: rate, pose, age, clock offset, fence status. Nothing moves."""
+        self.wait_mocap()
+        c0 = self.ros.mocap_count
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            time.sleep(1.0)
+            pose, age = self.ros.mocap()
+            with self.ros._lock:
+                ta, ts = self.ros.mocap_hist[-1][:2]
+            rate = (self.ros.mocap_count - c0) / (time.time() - t0)
+            print(f"rate {rate:6.1f} Hz | x {pose[0]:7.3f} y {pose[1]:7.3f} yaw {np.degrees(pose[2]):7.1f} deg | "
+                  f"age {age * 1000:5.1f} ms | arrival(host)-stamp {time.time() - (time.monotonic() - ta) - ts:9.3f} s | "
+                  f"{'inside' if self.fence.inside(pose) else 'OUTSIDE'} fence")
+        if rate < 50:
+            print("WARNING: mocap rate below 50 Hz (the protocol wants >= 100 Hz)")
+
+    def step_odin(self, seconds: float = 20.0):
+        """Start the Odin driver in odometry mode, report what it publishes, stop it. Nothing moves."""
+        run_dir = self.root / "logs"
+        self.start_driver(0, run_dir, f"odin_check_{int(time.time())}")
+        print(f"driver up (log: {self.driver.log_path}); listening {seconds:.0f} s ...")
+        i0, p0 = self.ros.imu_count, dict(self.ros.tf_pair_counts)
+        time.sleep(seconds)
+        print(f"  /odin1/imu: {(self.ros.imu_count - i0) / seconds:.0f} Hz")
+        for pair, n in sorted(self.ros.tf_pair_counts.items()):
+            print(f"  tf {pair[0]} -> {pair[1]}: {(n - p0.get(pair, 0)) / seconds:.0f} Hz")
+        need = (self.cfg["frames"]["odin_odom"], self.cfg["frames"]["odin_imu"])
+        if need not in self.ros.tf_pair_counts:
+            print(f"WARNING: no {need[0]} -> {need[1]} tf: check send_odom_baselink_tf / frames in the config")
+        print(f"  device serial (calib.yaml): {self.driver.device_serial()}")
+        self.driver.stop()
+
+    def step_jog(self, speed: float = 0.15, rate: float = 0.5, seconds: float = 0.6):
+        """Open-loop pulses to check command directions: +x should move forward, +y left, +wz CCW.
+        Mocap is still watched (stale / fence stop the robot)."""
+        self.wait_mocap()
+        self.prompt("Remote: left switch UP, right switch MID. Clear ~0.5 m around the robot.")
+        rows = []
+        for name, cmd in (("+vx (forward)", [speed, 0, 0]), ("-vx", [-speed, 0, 0]), ("+vy (left)", [0, speed, 0]),
+                          ("-vy", [0, -speed, 0]), ("+wz (CCW)", [0, 0, rate]), ("-wz", [0, 0, -rate])):
+            start = self.pose()
+            t_end = time.monotonic() + seconds
+            try:
+                while time.monotonic() < t_end:
+                    if not self.fence.inside(self.pose()):
+                        raise Abort("fence")
+                    self.cmd.send(*cmd)
+                    time.sleep(self.dt)
+            finally:
+                self.stop_robot()
+            time.sleep(0.8)
+            end = self.pose()
+            c, s = np.cos(start[2]), np.sin(start[2])
+            d = end[:2] - start[:2]
+            rows.append((name, c * d[0] + s * d[1], -s * d[0] + c * d[1], np.degrees(wrap(end[2] - start[2]))))
+        print(f"\n{'command':16s} {'moved fwd m':>11s} {'moved left m':>12s} {'turned deg':>10s}")
+        for r in rows:
+            print(f"{r[0]:16s} {r[1]:11.3f} {r[2]:12.3f} {r[3]:10.1f}")
+        print("expected: +vx -> +fwd, +vy -> +left, +wz -> +deg (CCW). Signs are also learned by `check`, "
+              "but a robot that does not move at all means the bridge/MCB/remote are not set up.")
+
     # ============================================================== steps
     def step_check(self):
         """Mocap alive, inside fence, no stray driver, and identify command gains with mocap."""
+        self.wait_mocap()
         pose = self.pose()
-        print(f"mocap OK: base_link at {pose.round(3)}")
+        print(f"mocap OK: robot at {pose.round(3)}")
         if not self.fence.inside(pose, self.fence.margin + 0.6):
             raise Abort("put the robot at least 1 m inside the fence before starting")
         if self.driver.already_running() and not self.driver.alive():
@@ -610,7 +690,8 @@ class Campaign:
             print(f"\n\n          ######## {text} ########\n", flush=True)
 
     # ------------------------------------------------------------------ main
-    STEPS = ["check", "preflight", "calib", "map", "session", "holds", "latency", "init", "outage"]
+    BRINGUP = ["mocap", "odin", "jog"]  # debugging aids, always run, never recorded
+    STEPS = BRINGUP + ["check", "preflight", "calib", "map", "session", "holds", "latency", "init", "outage"]
     CHAINS = {
         "day1": ["check", "preflight", "calib", "map", "session", "holds", "latency", "init", "outage"],
         "day2": ["check", "session"],
@@ -622,17 +703,24 @@ class Campaign:
         for s in steps:
             if s == "check" and self.gains_checked:
                 continue
-            if s != "check" and s != "session" and self.done(s) and not redo:
+            if s not in self.BRINGUP + ["check", "session"] and self.done(s) and not redo:
                 print(f"[{s} already done; --redo to repeat]")
                 continue
             if s == "session" and step in ("day2", "day3") and self.done(f"session_{step}"):
                 print(f"[{step} session already recorded]")
                 continue
             print(f"\n================ {s} ================")
-            getattr(self, f"step_{s}")()
+            try:
+                getattr(self, f"step_{s}")()
+            except Abort as e:
+                with open(self.root / "aborts.log", "a") as f:
+                    pose = self.ros.mocap()
+                    f.write(f"{datetime.now().isoformat(timespec='seconds')} step={s} chain={step} "
+                            f"pose={None if pose is None else pose[0].round(3).tolist()} reason={e}\n")
+                raise
             if s == "session" and step in self.CHAINS:
                 self.mark(f"session_{step}")
-            if s != "check" and not self.gains_checked and self.cfg["robot"].get("sysid", True) and "G" not in self.state:
+            if s not in self.BRINGUP + ["check"] and not self.gains_checked and self.cfg["robot"].get("sysid", True) and "G" not in self.state:
                 self.identify_gains()
 
     def close(self):
@@ -658,8 +746,8 @@ def main():
     cfg = yaml.safe_load(args.config.read_text())
     if (args.dir / "campaign.yaml").exists() and args.config.resolve() != (args.dir / "campaign.yaml").resolve():
         old = yaml.safe_load((args.dir / "campaign.yaml").read_text())
-        if old.get("frames") != cfg.get("frames"):
-            sys.exit("frames differ from the campaign's saved config; use the same config for a campaign")
+        if old.get("frames") != cfg.get("frames") or old.get("mocap") != cfg.get("mocap"):
+            sys.exit("frames/mocap differ from the campaign's saved config; use the same config for a campaign")
         shutil.copy(args.dir / "campaign.yaml", args.dir / f"campaign.yaml.{int(time.time())}.bak")
     c = Campaign(cfg, args.dir, prompts=not args.no_prompt, skip_warmup=args.skip_warmup)
     try:

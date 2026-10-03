@@ -143,57 +143,46 @@ def _cloud_stats(msg, roi, data: BagData):
 
 
 def read_bag(path: str | Path, cfg: dict) -> BagData:
-    """Read one bag. `cfg` is the `topics`/`frames` part of campaign.yaml."""
+    """Read one bag. `cfg` is campaign.yaml (uses its `topics`, `mocap` and `preflight` parts)."""
     from rosbags.highlevel import AnyReader
     from rosbags.typesys import Stores, get_typestore
 
+    from .mocap_config import MocapConfig
+
     topics = cfg["topics"]
-    frames = cfg["frames"]
+    mocap = MocapConfig.from_cfg(cfg)
     wanted_tf = {topics.get("tf", "/tf"), topics.get("tf_static", "/tf_static")}
-    mocap_topic = topics.get("mocap_pose")  # optional PoseStamped alternative to tf
     roi = cfg.get("preflight", {}).get("wall_roi")
 
     data = BagData(path=str(path))
-    data.mocap_clock = frames.get("mocap_clock", "host")
+    data.mocap_clock = mocap.clock
     typestore = get_typestore(Stores.LATEST)
     with AnyReader([Path(path)], default_typestore=typestore) as reader:
         data.topics = {c.topic: c.msgtype for c in reader.connections}
         data.t_start = reader.start_time * 1e-9
         data.t_end = reader.end_time * 1e-9
-        want = [
-            c
-            for c in reader.connections
-            if c.topic
-            in wanted_tf
-            | {
-                topics["odometry"],
-                topics["imu"],
-                topics.get("cloud", ""),
-                topics.get("markers", ""),
-                topics.get("rosout", "/rosout"),
-                mocap_topic or "",
-            }
-        ]
+        names = wanted_tf | {mocap.topic, topics["odometry"], topics["imu"], topics.get("cloud") or "",
+                             topics.get("markers") or "", topics.get("rosout", "/rosout")}
+        want = [c for c in reader.connections if c.topic in names]
         for conn, t_ns, raw in reader.messages(connections=want):
             t_recv = t_ns * 1e-9
             msg = reader.deserialize(raw, conn.msgtype)
+            if conn.topic == mocap.topic:
+                for st, p, q in mocap.extract(msg):
+                    data.mocap.t_stamp.append(st)
+                    data.mocap.t_recv.append(t_recv)
+                    data.mocap.p.append(p)
+                    data.mocap.q.append(q)
             if conn.topic in wanted_tf:
                 for tr in msg.transforms:
                     key = (tr.header.frame_id.lstrip("/"), tr.child_frame_id.lstrip("/"))
-                    target = (
-                        data.mocap
-                        if key == (frames["mocap_world"], frames["mocap_body"])
-                        else data.tf[key]
-                    )
-                    target.t_stamp.append(_stamp(tr.header))
-                    target.t_recv.append(t_recv)
-                    target.p.append(_xyz(tr.transform.translation))
-                    target.q.append(_xyzw(tr.transform.rotation))
-            elif conn.topic == mocap_topic:
-                data.mocap.t_stamp.append(_stamp(msg.header))
-                data.mocap.t_recv.append(t_recv)
-                data.mocap.p.append(_xyz(msg.pose.position))
-                data.mocap.q.append(_xyzw(msg.pose.orientation))
+                    s = data.tf[key]
+                    s.t_stamp.append(_stamp(tr.header))
+                    s.t_recv.append(t_recv)
+                    s.p.append(_xyz(tr.transform.translation))
+                    s.q.append(_xyzw(tr.transform.rotation))
+            elif conn.topic == mocap.topic:
+                continue
             elif conn.topic == topics["odometry"]:
                 data.odom.t_stamp.append(_stamp(msg.header))
                 data.odom.t_recv.append(t_recv)
@@ -207,11 +196,12 @@ def read_bag(path: str | Path, cfg: dict) -> BagData:
                 _cloud_stats(msg, roi, data)
             elif conn.topic == topics.get("markers"):
                 data.marker_t.append(t_recv)
-                n = len(getattr(msg, "markers", getattr(msg, "poses", [])))
-                data.marker_n.append(n)
+                data.marker_n.append(len(getattr(msg, "markers", getattr(msg, "poses", []))))
             elif conn.topic == topics.get("rosout", "/rosout"):
                 data.log_t.append(t_recv)
                 data.log_msg.append(getattr(msg, "msg", ""))
+    if len(data.mocap.t_stamp) == 0:
+        print(f"WARNING: no mocap samples in {path} for {mocap}. Topics in bag: {sorted(data.topics)}")
     return data
 
 

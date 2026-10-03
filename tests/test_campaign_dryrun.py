@@ -158,6 +158,9 @@ def test_day1_dry_run(tmp_path, small_cfg):
     try:
         c.run("day1", redo=False)
         c.run("day2", redo=False)
+    except Exception as e:
+        log = root / "aborts.log"
+        raise AssertionError(f"{e!r}\n{log.read_text() if log.exists() else ''}") from e
     finally:
         c.close()
 

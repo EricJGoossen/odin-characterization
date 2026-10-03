@@ -1,110 +1,155 @@
 # Odin1 Tier 0 characterization
 
-Autonomous data collection on the ARUW sentry plus the analysis that fits and validates the
-Tier 0 error model of the *Odin1 Tier 0 Error Characterization Protocol* (static field ε_s,
-FOGM η with Student-t innovations, latency τ_d, INIT/TRACK/LOST events).
+Fits and validates the Tier 0 error model of the *Odin1 Tier 0 Error Characterization Protocol*
+on the ARUW sentry: static field ε_s, FOGM η with Student-t innovations, latency τ_d, and
+INIT/TRACK/LOST events. Ground truth is the already-running mocap. **Wheel encoders are never
+used**: the robot is driven on mocap feedback, and its command gains are identified from mocap.
 
-Ground truth is the mocap `mocap → base_link` transform. **Wheel encoders are never used**:
-the robot is driven on mocap feedback, and its command gains are identified from mocap.
-
-## What runs where
+The work is split into three parts, each on its own branch or repo:
 
 ```
-mocap ──/tf mocap→base_link──► campaign (robot computer, ROS 2, 50 Hz)
-                                  │ UDP (vx, vy, wz body frame)
-                                  ▼
-               project-otto  tools/chassis_velocity_bridge.py  (Jetson, replaces otto main)
-                                  │ UART msg 0x14, 100 Hz
-                                  ▼
-               aruw-mcb  ExternalVelocityCommand + TurretMajorChassisHoldCommand
-                         (remote: left UP / right MID)
+                 (3) odin-characterization  ── this repo, robot computer with ROS 2
+                     │  subscribes to mocap (configurable), starts/stops the Odin driver,
+                     │  records bags, closes the loop on mocap, runs the analysis
+                     │ UDP :47020  (seq, vx, vy, wz; chassis frame)
+                     ▼
+                 (1) project-otto @ odin-characterization  ── Jetson
+                     │  `poetry run odin-characterization` (replaces otto's main loop)
+                     │ UART message 0x14 @ 100 Hz
+                     ▼
+                 (2) aruw-mcb @ odin-characterization  ── sentry MCB
+                        remote left UP / right MID: ExternalVelocityCommand
+                        + TurretMajorChassisHoldCommand (holds Odin's turret still)
 ```
 
-* **aruw-mcb**, branch `odin-characterization`: new UART message `CV_MESSAGE_TYPE_CHASSIS_VELOCITY`
-  (20). On the sentry, *left UP / right MID* now runs `ExternalVelocityCommand`, which drives
-  the chassis from that message and stops if no command arrives for 150 ms. The same switch
-  state runs `TurretMajorChassisHoldCommand`, which holds turret major (and Odin on it) at a
-  fixed chassis yaw. Flip out of that switch state to stop the robot. Do not take this branch
-  to competition: it replaces auto-nav + auto-aim on that switch state.
-* **project-otto**, branch `odin-characterization`: `ChassisVelocityMessage` (0x14) and
-  `tools/chassis_velocity_bridge.py`.
-* **this repo**: the campaign (`odin_char/robot`) and the analysis (`odin_char/*.py`).
+## 1. project-otto: Odin characterization mode
 
-Odin facts used here come from `manifoldsdk/odin_ros_driver` v0.14.4: frames `odom→imu` and
-`odom→map` (parent `odom`, child `map`, published only in relocalization mode), topics
-`/odin1/{imu,odometry,odometry_highfreq,cloud_raw}`, the `/odin1/save_map` service, and
-the `relocalization success!` log line.
+Branch `odin-characterization`, documented in `docs/odin_characterization.md` there.
 
-## The scripts you run
+* `project_otto/messages/_chassis_velocity_message.py`: `ChassisVelocityMessage`
+  (type `0x14`: `uint32 seq, float vx, float vy, float wz`).
+* `tools/chassis_velocity_bridge.py`, run as `poetry run odin-characterization`: a UDP → UART
+  bridge at 100 Hz. It sends zeros if the script goes quiet for 100 ms and prints a status line
+  every second. `--dummy` runs it without an MCB.
+* `tests/messages/test_chassis_velocity_message.py`.
 
-| | where | what |
-|---|---|---|
-| `scripts/setup.sh` | robot computer (ROS 2 sourced) and/or laptop | venv + self-tests |
-| `scripts/start_bridge.sh` | Jetson, own terminal | UDP → UART bridge (stop otto main first) |
-| `scripts/run_campaign.sh day1` | robot computer | Phases 0, 1, 2 (session 1), 3, 4, 5 |
-| `scripts/run_campaign.sh day2` / `day3` | robot computer, later days | Phase 2 sessions 2 and 3 |
-| `scripts/analyze.sh` | anywhere | Phase 1 fits, Phases 2–6 analysis → `results/report.md` |
+## 2. aruw-mcb: chassis velocity from the coprocessor
 
-## Before the first run
+Branch `odin-characterization`, documented in `docs/odin_characterization.md` there. **Don't take
+it to competition.**
 
-1. **MCB.** Flash `aruw-mcb@odin-characterization` (`scons run robot=SENTRY_ACHLYS`).
-2. **otto.** Check out `project-otto@odin-characterization` on the Jetson and run `poetry install`.
-3. **This repo.** Run `scripts/setup.sh` on the robot computer, after sourcing ROS 2 and the
-   workspace containing `odin_ros_driver`.
-4. **Config.** Edit `config/campaign.yaml`. Everything marked `VERIFY`:
-   * `frames.mocap_world` / `mocap_body`: your mocap tf names. Mocap stamps are taken to be on
-     the **mocap server clock** (`frames.mocap_clock: server`); each bag is mapped onto the host
-     clock from message arrival times.
-   * `room.fence_min/max`, `room.home`: the safe box in the mocap world frame, and where the robot
-     parks. Start every run with the robot at least 1 m inside the fence.
-   * `phases.phase2`: the figure-8 (centre, size, rotation, speed) through the regions that matter.
-   * `phases.phase3.locations`: 3–5 hold spots with different geometry, inside the figure-8's
-     area if possible.
-   * `driver.base_config`: your deployed `control_command.yaml`. It is copied per run with the
-     map mode, `use_host_ros_time: 2` and `devstatuslog: 1`; the installed file is not modified.
-   * `hand_eye_prior`: base_link → Odin IMU from CAD (`[tx ty tz rx ry rz]`, rotation vector).
-     Planar driving cannot observe the vertical lever arm, so this pins it. The report says which
-     parameters came from the prior.
-   * `metadata`: optional `firmware`, `driver_version`, `people_present` for the metadata sheet.
-5. **Mocap.** Ideally put the mocap rigid body on Odin's bracket and set `mocap_body` to it. If it
-   stays on the chassis, the turret-major hold keeps Odin rigid relative to it.
+* `vision_coprocessor.{hpp,cpp}`: RX message `CV_MESSAGE_TYPE_CHASSIS_VELOCITY = 20`.
+* `control/chassis/external_velocity_command.{hpp,cpp}`: chassis velocity in SI units, a 150 ms
+  watchdog, and hard caps of 2.5 m/s and 6 rad/s.
+* `robot/sentry/turret/turret_major_chassis_hold_command.{hpp,cpp}`: holds turret major at a
+  fixed, encoder-referenced chassis yaw.
+* `robot/sentry/sentry_control.cpp`: **left UP / right MID** runs both commands.
 
-## Day 1
+## 3. odin-characterization (this repo): stitching, mocap, Odin, analysis
 
-Terminal A (Jetson): `scripts/start_bridge.sh`
+| path | what |
+|---|---|
+| `config/campaign.yaml` | **the one file to edit**: mocap source, room, figure-8, Odin driver |
+| `odin_char/robot/campaign.py` | the campaign: bring-up steps, all protocol phases, safety, resume |
+| `odin_char/robot/ros_io.py` | ROS 2: mocap subscriber (any source type), Odin tf/IMU watch, UDP sender |
+| `odin_char/robot/processes.py` | Odin driver (per-run config copy, log watching, map save) and `ros2 bag record` |
+| `odin_char/robot/motion.py` | trajectories, mocap-feedback controller, geofence, command-gain identification |
+| `odin_char/robot/discover.py` | `find-mocap`: lists the live mocap candidates |
+| `odin_char/mocap_config.py` | the `mocap:` config block (tf, PoseStamped, TransformStamped, Odometry) |
+| `odin_char/*.py` | analysis: calibration, errors, latency, static field, FOGM, events, model, Phase 6 |
+| `scripts/` | `setup.sh`, `start_bridge.sh`, `run_campaign.sh`, `analyze.sh` |
 
-Terminal B (robot computer, ROS 2 sourced): `scripts/run_campaign.sh day1`
+### Mocap configuration
 
-The script prompts (with a beep) only when it needs a person:
+The mocap topic and frame names aren't known in advance, so they're configured in one place:
 
-1. Set the remote to **left UP / right MID**. The script then nudges the robot back and forth to
-   identify the command gains from mocap.
-2. Phase 0: turn the mocap strobes **off**, then back on. Then power Odin **off**, then back on.
-3. Phase 2: stand at `operator_spot` and stay there (a moving person is a dynamic object).
-4. Phase 5 outages: cover Odin's window on **COVER NOW** and uncover on **UNCOVER NOW**. Set
-   `phases.phase5.shutter_cmd_cover/uncover` to automate this with a shutter.
+```yaml
+mocap:
+  source: tf            # tf | pose (PoseStamped) | transform (TransformStamped) | odometry
+  topic: /tf            # the topic carrying it
+  parent_frame: mocap   # tf only
+  child_frame: base_link  # tf only: the robot's rigid body
+  clock: server         # stamps from the mocap server's clock (mapped to host time per bag)
+  qos: best_effort      # also receives reliable publishers
+```
 
-Everything else is autonomous: 20 min warm-up, calibration motion, SLAM mapping with automatic
-map save, session 1 (fresh relocalization start, 10 nominal laps, 2 at 0.5×, 2 at 1.5×), 10 min
-holds, latency sinusoids, 24 INIT cold starts and outages. `--no-prompt` skips the steps that need
-a person so the rest can run unattended. Steps are resumable: after an abort, rerun the same
-command and finished steps are skipped (`--redo` repeats them).
+`scripts/run_campaign.sh find-mocap` listens to every topic that could carry a pose. It prints
+each one's rate, frames and arrival-minus-stamp offset, then a ready-to-paste `mocap:` block.
 
-## Days 2 and 3
+Odin's names come from `manifoldsdk/odin_ros_driver` v0.14.4 and are already set:
 
-`scripts/run_campaign.sh day2`, and later `day3`: a gain check plus one Phase 2 session each.
-Keep the scene and firmware/driver versions the same.
+* tf `odom → imu`, and `odom → map` (parent `odom`, published only in relocalization mode)
+* topics `/odin1/imu`, `/odin1/odometry`, `/odin1/cloud_raw`
+* service `/odin1/save_map`
+
+The campaign runs the driver itself (`ros2 run odin_ros_driver host_sdk_sample` with its own
+copy of your `control_command.yaml`), so don't start Odin by hand.
+
+## Bring-up order (first time)
+
+```
+1. MCB:    flash aruw-mcb@odin-characterization   (cd aruw-mcb-project && scons run robot=SENTRY_ACHLYS)
+2. otto:   on the Jetson, stop otto's main loop, then  scripts/start_bridge.sh
+           (or: cd project-otto && poetry run odin-characterization)
+3. this:   scripts/setup.sh                     (once; ROS 2 + odin driver workspace sourced)
+           scripts/run_campaign.sh find-mocap   -> paste the mocap: block into config/campaign.yaml
+           scripts/run_campaign.sh mocap        live pose/rate/clock, fence check (no motion)
+           scripts/run_campaign.sh odin         starts Odin 20 s, lists its topics (no motion)
+           scripts/run_campaign.sh jog          remote L-UP/R-MID; tiny pulses, prints motion per command
+           scripts/run_campaign.sh check        identifies command -> velocity gains from mocap
+4. collect: scripts/run_campaign.sh day1        (later days: day2, day3)
+5. analyse: scripts/analyze.sh                  -> campaigns/odin1/results/report.md
+```
+
+Each bring-up step isolates one link of the chain:
+
+| failing step | what's broken |
+|---|---|
+| `find-mocap` | ROS networking or `ROS_DOMAIN_ID` |
+| `mocap` | the `mocap:` config |
+| `odin` | the Odin driver, USB, or `driver.base_config` |
+| `jog` | otto bridge (watch its status line), UART, the MCB branch, or the remote switch |
+| `check` | gains, if they're implausible |
+
+## Before day 1, edit `config/campaign.yaml`
+
+* `mocap:` (see above).
+* `room.fence_min/max`, `room.home`: a safe box in the mocap world frame. Start with the robot at
+  least 1 m inside it.
+* `phases.phase2`: the figure-8 through the regions that matter. `phases.phase3.locations`: 3–5
+  hold spots.
+* `driver.base_config`: your deployed `control_command.yaml`. It is copied per run with the map
+  mode, `use_host_ros_time: 2` and `devstatuslog: 1` applied; the installed file isn't changed.
+* `hand_eye_prior`: rigid body → Odin IMU from CAD (`[tx ty tz rx ry rz]`, rotation vector).
+  Planar driving can't observe the vertical lever arm.
+
+## Collection
+
+`scripts/run_campaign.sh day1` beeps and waits only when it needs a person:
+
+1. the remote switch,
+2. mocap strobes off/on and Odin power off/on (Phase 0),
+3. standing at the operator spot (Phase 2),
+4. covering Odin on **COVER NOW** / **UNCOVER NOW** (Phase 5 outages, unless a shutter command is set).
+
+Everything else is autonomous: warm-up, calibration, SLAM map plus automatic save, session 1,
+holds, latency, 24 cold starts and outages. `--no-prompt` skips the steps that need a person.
+After an abort, rerun the same command: finished steps are skipped (`--redo` repeats them).
+`day2` and `day3` each add one Phase 2 session.
+
+Outputs per campaign: `bags/`, `logs/` (driver logs and per-run config copies), `manifest.json`,
+`metadata.csv`, `state.json`.
 
 ## Analysis
 
-`scripts/analyze.sh campaigns/odin1` writes `campaigns/odin1/results/`:
+`scripts/analyze.sh [campaigns/odin1]` runs anywhere, no ROS needed. It writes `results/`:
 
-* `report.md`: every pass/fail check from the protocol, Tier 1 screens and the Tier 0 verdict
-* `model.yaml`: τ_d; per-axis P, τ_c, ν for moving and stationary; events (λ_fix, logistic
-  p(success), p_wrong, λ_lost or its rule-of-three bound, λ_rec)
-* `static_field_grid.npz`: ε_s on a 0.1 m grid in the map frame
-* `calibration.json`: time offset, hand-eye X, frozen T_WM
-* `results.json`, `figures/`
+* `report.md`: every protocol pass/fail check, the Tier 1 screens and the verdict
+* `model.yaml`
+* `static_field_grid.npz`
+* `calibration.json`
+* `results.json`
+* `figures/`
 
 ## Safety
 
@@ -115,39 +160,32 @@ The robot moves only while the remote is in left UP / right MID. The campaign st
 * the tracking error exceeds 0.5 m, or
 * you press Ctrl-C.
 
-Every trajectory is checked against the fence before it starts. The bridge zeroes the command if
-the campaign goes quiet for 100 ms. The MCB zeroes it if no command arrives for 150 ms, if otto is
-offline or if a motor is offline, and caps speed at 2.5 m/s and 6 rad/s.
+Every trajectory is checked against the fence before it starts. The bridge zeroes the command
+after 100 ms of silence. The MCB zeroes it after 150 ms without a command, when CV is offline, or
+when a motor is offline.
 
-## Where this deviates from the protocol, and why
+## Deviations from the protocol, and why
 
-* **Hand-eye.** Ground robots mostly yaw, so the vertical lever arm is unobservable from motion.
-  A CAD prior pins it, and the report lists the prior-dominated parameters. Odometry lags mocap
-  by τ_d, so that lag is estimated and removed before solving AX = XB.
-* **Latency regression.** Done within position bins. On a figure-8, yaw rate correlates with
-  position, so a static field would otherwise leak into τ_d. The speed sweeps provide the
-  variation.
-* **Static field.** Kept per axis. An axis with negative held-out R² only adds noise. Set
-  `analysis.static_field_per_axis: false` for the literal reading.
-* **Stationary holds.** The static error at each hold spot is the hold's mean, because the GP
-  field is only trustworthy where the figure-8 went. Both values are reported.
-* **Error translation.** Uses p̂ − p in body-aligned axes rather than the translation part of
-  Log(T̂ T⁻¹), which carries a lever arm about the map origin.
-* **Phase 6 verdict.** Uses exact Monte Carlo rank tests (a global envelope for the ACF, QQ and RPE
-  curves), family-wise over the six axes, with parameter uncertainty in the simulations. The
-  protocol's per-axis 5–95% band results are reported alongside. 200 realizations, since 50
-  cannot reach the per-axis level.
-* **INIT offsets.** Distance to the *nearest* point of the mapping path, since a lawnmower map has
-  no single trajectory. The achieved offset is logged and used.
+* **Hand-eye:** a CAD prior pins the unobservable vertical lever arm, and the odometry lag is
+  removed before solving AX = XB.
+* **Latency:** the regression runs within position bins, because on a figure-8 yaw rate
+  correlates with position.
+* **Static field:** kept per axis (`analysis.static_field_per_axis`). At hold spots the static
+  error is the hold mean.
+* **Error translation:** uses p̂ − p in body-aligned axes, which avoids a lever arm about the map
+  origin.
+* **Phase 6:** exact Monte Carlo rank tests (a global envelope for the curves), family-wise over
+  the six axes, with parameter uncertainty and 200 realizations. The doc's 5–95% bands are
+  reported too.
+* **INIT offsets:** distance to the nearest point of the mapping path; the achieved values are
+  logged.
 
 ## Tests
 
-`.venv/bin/python -m pytest -q`:
+`.venv/bin/python -m pytest -q` (~8 min):
 
-* `test_pipeline.py`: a synthetic campaign written as real rosbag2 files with known values
-  (mocap server clock offset/drift and jitter, hand-eye, T_WM, τ_d, static field, FOGM/t, events).
-  The full analysis must recover them.
-* `test_validate.py`: Phase 6 passes the true model and rejects wrong σ, τ_c or τ_d.
-* `test_motion.py`: trajectories, controller tracking, fence, command-gain identification.
-* `test_campaign_dryrun.py`: the whole `day1` + `day2` orchestration against a simulated sentry,
-  mocap and Odin driver (~5 min, real time).
+* synthetic rosbag campaign → full analysis recovers the known parameters
+* mocap source types
+* Phase 6 power: accepts the true model, rejects wrong ones
+* motion and controller
+* full `day1` + `day2` dry run against a simulated sentry, mocap and driver

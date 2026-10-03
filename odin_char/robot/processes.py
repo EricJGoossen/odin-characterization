@@ -155,9 +155,11 @@ class BagRecorder:
                  tp.get("rosout", "/rosout"), "/odin_char/event", "/odin_char/cmd"]
         if with_cloud and tp.get("cloud"):
             names.append(tp["cloud"])
-        for k in ("markers", "mocap_pose"):
-            if tp.get(k):
-                names.append(tp[k])
+        if tp.get("markers"):
+            names.append(tp["markers"])
+        mocap_topic = self.cfg["mocap"]["topic"]
+        if mocap_topic not in names:
+            names.append(mocap_topic)
         return names
 
     def start(self, path: Path, with_cloud: bool = False):

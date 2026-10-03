@@ -228,7 +228,7 @@ def make_campaign(root: Path, seed: int = 1, laps: int = 12, short: bool = False
     cfg = yaml.safe_load((Path(__file__).parents[1] / "config" / "campaign.yaml").read_text())
     cfg["analysis"]["mc_realizations"] = 20 if short else 50
     cfg["hand_eye_prior"] = {"X": [0.1, 0.0, 0.33, 0.0, 0.0, 0.5], "prior_sigma_t": 0.05, "prior_sigma_rot_deg": 10}
-    frames = cfg["frames"]
+    frames = {**cfg["frames"], "mocap_world": cfg["mocap"]["parent_frame"], "mocap_body": cfg["mocap"]["child_frame"]}
     root.mkdir(parents=True, exist_ok=True)
     (root / "campaign.yaml").write_text(yaml.safe_dump(cfg))
     specs: list[RunSpec] = []
