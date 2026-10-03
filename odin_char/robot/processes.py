@@ -116,8 +116,9 @@ class OdinDriver:
         self.event_lines = {}
         self.mode = mode
         self.started_at = time.time()
-        self.proc = subprocess.Popen(shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                     text=True, bufsize=1, start_new_session=True)
+        # stdin=DEVNULL: child processes must never read the operator's keystrokes (Enter)
+        self.proc = subprocess.Popen(shlex.split(cmd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
         threading.Thread(target=self._reader, daemon=True).start()
 
     def _reader(self):
@@ -156,7 +157,7 @@ class OdinDriver:
         from the driver's own "Map transfer completed: <path>" line), or None on failure/timeout."""
         svc = self.cfg["save_map_service"]
         r = subprocess.run(["ros2", "service", "call", svc, "odin_ros_driver/srv/SaveMap", "{value: 1}"],
-                           capture_output=True, text=True, timeout=60)
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
         if r.returncode != 0 or "success=True" not in r.stdout.replace(" ", ""):
             raise RuntimeError(f"save_map service call failed: {r.stdout} {r.stderr}")
         t_end = time.time() + (timeout or float(self.cfg.get("save_map_timeout_s", 600)))
@@ -215,8 +216,8 @@ class BagRecorder:
             cmd += ["--qos-profile-overrides-path", str(qos)]
         cmd += self.topics(with_cloud)
         self.path = path
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                     start_new_session=True)
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
         time.sleep(2.0)  # subscriptions come up before anything interesting happens
         if self.proc.poll() is not None:
             raise RuntimeError("ros2 bag record exited immediately")

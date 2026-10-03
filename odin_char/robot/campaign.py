@@ -704,7 +704,7 @@ class Campaign:
     def _announce(self, text: str, cmd: str | None):
         self.ros.event(text)
         if cmd:
-            subprocess.run(cmd, shell=True, check=False)
+            subprocess.run(cmd, shell=True, check=False, stdin=subprocess.DEVNULL)
         else:
             beep(3 if "UNCOVER" in text else 1)
             print(f"\n\n          ######## {text} ########\n", flush=True)

@@ -94,6 +94,10 @@ class HumanCampaign(Campaign):
             line = "mocap STALE" if p is None or s["age"] > 0.2 else status(st)
             if p is not None and not self.fence.inside(p, 0.0):
                 line += "  !! OUTSIDE FENCE"
+            if min_s and st["elapsed"] < min_s:
+                line += f"  [Enter accepted in {min_s - st['elapsed']:.0f} s]"
+            elif done is None:
+                line += "  [press Enter to finish]"
             if target_s and st["elapsed"] >= target_s and not st["target_beeped"]:
                 beep(2)
                 st["target_beeped"] = True
