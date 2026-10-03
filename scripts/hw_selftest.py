@@ -58,8 +58,8 @@ def main():
         except Exception as e:  # noqa: BLE001
             print("   ", e)
         target = c.driver.event_lines.get("map_save_target", "(no 'will transfer to' line)")
-        check("save target is the campaign maps/ folder", str(args.dir / "maps") in target, target)
-        check("map generated + saved via /odin1/save_map", mp.exists(),
+        check("driver saves to its map folder (SLAM mode really active)", "/odin_ros_driver/map/" in target, target)
+        check("map generated, saved and copied into the campaign", mp.exists(),
               f"{mp.stat().st_size if mp.exists() else 0} B (a stationary robot may never finish generating)")
         c.driver.stop()
         if not mp.exists():
