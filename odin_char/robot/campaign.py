@@ -121,7 +121,12 @@ class Campaign:
         return True
 
     def new_run(self, name: str, phase: str, **meta) -> dict:
-        rid = len(self.manifest["runs"])
+        # next id not used by the manifest nor by a bag folder (an interrupted run can leave a
+        # folder behind that never made it into the manifest)
+        used = {r["id"] for r in self.manifest["runs"]}
+        rid = max(used, default=-1) + 1
+        while rid in used or any((self.root / "bags").glob(f"{rid:03d}_*")):
+            rid += 1
         run = {"id": rid, "name": f"{rid:03d}_{name}", "phase": phase, "bag": f"bags/{rid:03d}_{name}",
                "started": time.time(), **meta}
         self.manifest["runs"].append(run)
@@ -810,4 +815,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Run from the package module, not this `__main__` copy: human.py imports
+    # odin_char.robot.campaign, and its Abort must be the class main() catches.
+    from odin_char.robot.campaign import main as _main
+
+    _main()
