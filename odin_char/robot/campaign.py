@@ -298,7 +298,12 @@ class Campaign:
     # ------------------------------------------------------------------ recording helper
     def record(self, run: dict, body, with_cloud: bool = False, speed=None):
         bag = self.root / run["bag"]
-        self.rec.start(bag, with_cloud)
+        try:
+            self.rec.start(bag, with_cloud)
+        except (RuntimeError, FileExistsError) as e:
+            self.manifest["runs"].remove(run)
+            self.save()
+            raise Abort(f"could not start recording: {e}") from e
         self.ros.event(f"run_start {run['name']}")
         try:
             body()
@@ -675,7 +680,7 @@ class Campaign:
                     th.join()
                     self.wait_still(5.0)
 
-                self.record(r, body, with_cloud=True)
+                self.record(r, body, with_cloud=bool(self.cfg.get("recording", {}).get("cloud_in_outages", False)))
                 self.manifest["outages"].append({"run": r["id"], "key": key, "cover_s": dur, **times})
                 self.save()
         self.home()

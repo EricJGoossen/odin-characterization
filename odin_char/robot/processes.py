@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -151,8 +152,11 @@ class BagRecorder:
 
     def topics(self, with_cloud: bool) -> list[str]:
         tp = self.cfg["topics"]
-        names = [tp["tf"], tp["tf_static"], tp["odometry"], tp["odometry_highfreq"], tp["imu"],
+        rc = self.cfg.get("recording", {})
+        names = [tp["tf"], tp["tf_static"], tp["odometry"], tp["imu"],
                  tp.get("rosout", "/rosout"), "/odin_char/event", "/odin_char/cmd"]
+        if rc.get("odometry_highfreq", False):
+            names.append(tp["odometry_highfreq"])
         if with_cloud and tp.get("cloud"):
             names.append(tp["cloud"])
         if tp.get("markers"):
@@ -166,6 +170,11 @@ class BagRecorder:
         if path.exists():
             raise FileExistsError(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        free_gb = shutil.disk_usage(path.parent).free / 1e9
+        min_gb = float(self.cfg.get("recording", {}).get("min_free_gb", 2.0))
+        if free_gb < min_gb:
+            raise RuntimeError(f"only {free_gb:.1f} GB free on {path.parent} (minimum {min_gb} GB): "
+                               "move old bags off this machine before recording")
         cmd = ["ros2", "bag", "record", "-o", str(path)]
         qos = expand(self.cfg["driver"].get("qos_overrides"))
         if qos and qos.exists():

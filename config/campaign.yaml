@@ -40,6 +40,14 @@ topics:                       # Odin driver topics (odin_ros_driver v0.14.4)
   cloud: /odin1/cloud_raw
   rosout: /rosout
   markers: null               # optional mocap marker array topic (Phase 0 ghost-marker check)
+# --------------------------------------------------------------------------- recording
+# Measured on the sentry Jetson: /odin1/cloud_raw 7.5 MB/s (27 GB/h), imu 0.13 MB/s,
+# odometry_highfreq 0.29 MB/s. The cloud is recorded only for the Phase 0 preflight (needed there).
+recording:
+  min_free_gb: 2.0            # a recording refuses to start below this
+  odometry_highfreq: false    # the analysis uses the odom->imu tf; saves ~1 GB/h
+  cloud_in_outages: true      # refine cover/uncover times from the cloud (~0.45 GB per minute, ~5 GB total)
+
 # --------------------------------------------------------------------------- robot / room
 robot:
   bridge_host: 127.0.0.1      # where tools/chassis_velocity_bridge.py (project-otto) runs
