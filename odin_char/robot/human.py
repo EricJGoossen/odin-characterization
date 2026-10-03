@@ -355,6 +355,35 @@ class HumanCampaign(Campaign):
         self.save()
         self.mark(f"session_{sid}")
 
+    def step_validation(self):
+        """Short held-out figure-8 run: a fresh relocalization start, then validation_laps steady laps.
+        Recorded as the last Phase 2 session, which the analysis holds out for Phase 6 validation."""
+        p2 = self.cfg["phases"]["phase2"]
+        laps = int(p2.get("validation_laps", 5))
+        sessions = sorted({r["session"] for r in self.manifest["runs"] if r["phase"] == "phase2"})
+        sid = f"s{len(sessions) + 1}"
+        print(f"=== validation run ({sid}, held out from fitting): {laps} laps ===")
+        self.ask("Everyone except the driver back at the fixed spot, out of Odin's view.")
+        self.warmup(2)
+        self.ask("Drive to the start of the figure-8 (tape) and stop.")
+        run_dir = self.root / "logs"
+        r = self.new_run(f"{sid}_validation", "phase2", session=sid, speed_class="1x", validation=True)
+        measured = {}
+
+        def body():
+            t_launch, fix = self.fresh_relocalized_start(run_dir, sid)
+            self.manifest["init_trials"].append({"run": r["id"], "offset_m": 0.0, "heading_deg": 0.0, "moving": False,
+                                                 "t_launch": t_launch, "t_log_success": self.driver.events.get("relocalized"),
+                                                 "timeout": self.cfg["phases"]["phase5"]["timeout_s"], "source": "validation_start"})
+            if fix is None:
+                raise Abort("no relocalization fix at the validation start")
+            measured["v"] = self._drive_laps(laps, p2["nominal_speed"], "Validation laps")
+
+        self.record(r, body, speed=p2["nominal_speed"])
+        r["measured_speed_mps"] = measured.get("v")
+        self.save()
+        self.mark("validation")
+
     def ensure_tracking(self):
         if self.driver.alive() and self.driver.mode == 2 and self.ros.first_map_tf_arrival is not None:
             return

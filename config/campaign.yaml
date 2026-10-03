@@ -133,6 +133,7 @@ phases:
     rotation_deg: 0.0
     nominal_speed: 0.8        # m/s
     nominal_laps: 10
+    validation_laps: 5        # `validation` step: a short extra run held out for Phase 6
     sweep_laps: 2
     sweep_factors: [0.5, 1.5]
     operator_spot: "fixed spot by the door, outside the lidar's view"

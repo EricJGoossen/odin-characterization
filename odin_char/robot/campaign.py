@@ -714,9 +714,13 @@ class Campaign:
 
     def step_survey(self):
         raise Abort("survey is driven by hand: run it with robot.control: human")
-    STEPS = BRINGUP + ["check", "preflight", "calib", "map", "session", "holds", "latency", "init", "outage"]
+
+    def step_validation(self):
+        print("[validation run is only implemented for human mode; skipped]")
+    STEPS = BRINGUP + ["check", "preflight", "calib", "map", "session", "validation", "holds", "latency", "init",
+                       "outage"]
     CHAINS = {
-        "day1": ["check", "preflight", "calib", "map", "session", "holds", "latency", "init", "outage"],
+        "day1": ["check", "preflight", "calib", "map", "session", "validation", "holds", "latency", "init", "outage"],
         "day2": ["check", "session"],
         "day3": ["check", "session"],
     }

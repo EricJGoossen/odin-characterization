@@ -70,9 +70,11 @@ def test_human_day1_and_day2(tmp_path, small_cfg):
     for p in ("preflight", "calib", "mapping", "phase2", "phase3", "phase4", "init", "outage"):
         assert p in phases, p
     p2 = [r for r in m["runs"] if r["phase"] == "phase2"]
-    assert {r["session"] for r in p2} == {"s1", "s2"} and len(p2) == 6
+    # day1: s1 (1x, 0.5x, 1.5x) + validation s2; day2: s3 (1x, 0.5x, 1.5x)
+    assert {r["session"] for r in p2} == {"s1", "s2", "s3"} and len(p2) == 7
+    assert [r["session"] for r in p2 if r.get("validation")] == ["s2"]
     assert {r["speed_class"] for r in p2} == {"1x", "0.5x", "1.5x"}
-    assert len(m["init_trials"]) == 8 + 2
+    assert len(m["init_trials"]) == 8 + 3
     real = [t for t in m["init_trials"] if t.get("key")]
     assert all("requested_offset_m" in t and t["offset_m"] >= 0 for t in real)
     assert len(m["outages"]) == 1 and m["outages"][0]["t_uncover"] > m["outages"][0]["t_cover"]
