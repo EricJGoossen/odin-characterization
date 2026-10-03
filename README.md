@@ -3,7 +3,48 @@
 Fits and validates the Tier 0 error model of the *Odin1 Tier 0 Error Characterization Protocol*
 on the ARUW sentry: static field ε_s, FOGM η with Student-t innovations, latency τ_d, and
 INIT/TRACK/LOST events. Ground truth is the already-running mocap. **Wheel encoders are never
-used**: the robot is driven on mocap feedback, and its command gains are identified from mocap.
+used.**
+
+## Two ways to run it (`robot.control` in `config/campaign.yaml`)
+
+* **`human` (default):** a person drives the sentry with the remote. The script starts and stops
+  Odin, records every run, tells you what to drive, and shows live mocap feedback (speed, laps,
+  map coverage, distance and heading to the next spot). It waits for Enter, and starts a hold by
+  itself once you're parked on target. **Nothing is sent to the robot**, so you need only this
+  repo, ROS 2, Odin and the mocap. Otto stays as it is, and the MCB can run `develop`.
+* **`autonomous`:** the script drives the robot on mocap feedback through otto's
+  odin-characterization mode and the MCB branch (parts 1 and 2 below). It needs a working
+  Jetson ↔ MCB UART link.
+
+The data and the analysis are identical either way. Hand-driven Phase 2 laps repeat less exactly,
+but the static field is binned by position, so that's fine.
+
+### Running in human mode
+
+```
+scripts/setup.sh                      # once (ROS 2 + ~/odin_ws are sourced automatically)
+scripts/run_campaign.sh find-mocap    # once: paste the printed mocap: block into the config
+scripts/run_campaign.sh mocap         # check the live mocap stream (nothing moves)
+scripts/run_campaign.sh odin          # check Odin starts and publishes (nothing moves)
+scripts/run_campaign.sh day1          # follow the on-screen instructions
+scripts/run_campaign.sh day2          # later: one more Phase 2 session (and day3)
+scripts/analyze.sh                    # -> campaigns/odin1/results/report.md
+```
+
+What day 1 asks of the driver, in order:
+
+| step | what you do | live feedback |
+|---|---|---|
+| preflight | mocap strobes off/on, Odin power off/on, robot still | countdown |
+| calib | ~2.5 min of driving with lots of spinning both ways and swerving | elapsed, yaw rate |
+| map | park centrally; then lanes ~1 m apart over the whole area plus loops around the edge | coverage %, distance |
+| session | park at the figure-8 start; Odin relocalizes; 10 steady laps, 2 slow, 2 fast | laps, speed vs target |
+| holds | drive to each spot (auto-detects when you're parked), then hands off for 10 min | distance and turn to target, countdown |
+| latency | ~80 s quick back-and-forth, then ~80 s rotating back and forth in place | elapsed, speed / yaw rate |
+| init | drive to each of 24 start poses (auto-detected); Odin restarts; for "moving" trials drive 1 m then turn 90° | distance and turn to target, time to fix |
+| outage | drive slowly back and forth; a second person covers Odin on **COVER NOW / UNCOVER NOW** | elapsed |
+
+## Autonomous mode: the three parts
 
 The work is split into three parts, each on its own branch or repo:
 
@@ -85,7 +126,7 @@ Odin's names come from `manifoldsdk/odin_ros_driver` v0.14.4 and are already set
 The campaign runs the driver itself (`ros2 run odin_ros_driver host_sdk_sample` with its own
 copy of your `control_command.yaml`), so don't start Odin by hand.
 
-## Bring-up order (first time)
+## Bring-up order for autonomous mode (first time)
 
 ```
 1. MCB:    flash aruw-mcb@odin-characterization   (cd aruw-mcb-project && scons run robot=SENTRY_ACHLYS)

@@ -754,7 +754,15 @@ def main():
         if old.get("frames") != cfg.get("frames") or old.get("mocap") != cfg.get("mocap"):
             sys.exit("frames/mocap differ from the campaign's saved config; use the same config for a campaign")
         shutil.copy(args.dir / "campaign.yaml", args.dir / f"campaign.yaml.{int(time.time())}.bak")
-    c = Campaign(cfg, args.dir, prompts=not args.no_prompt, skip_warmup=args.skip_warmup)
+    control = cfg["robot"].get("control", "human")
+    if control == "human":
+        from .human import HumanCampaign as cls
+    elif control == "autonomous":
+        cls = Campaign
+    else:
+        sys.exit(f"robot.control must be 'human' or 'autonomous', got {control!r}")
+    print(f"control: {control}")
+    c = cls(cfg, args.dir, prompts=not args.no_prompt, skip_warmup=args.skip_warmup)
     try:
         c.run(args.step, args.redo)
         print("\nstep finished. Analyse with: python -m odin_char.pipeline", args.dir)

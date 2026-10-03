@@ -50,6 +50,11 @@ recording:
 
 # --------------------------------------------------------------------------- robot / room
 robot:
+  # human: a person drives with the remote; the script guides, records and runs Odin (no commands
+  #        are sent, no otto mode or MCB branch needed). autonomous: the script drives over
+  #        otto's odin-characterization mode (needs a working Jetson <-> MCB link). The settings
+  #        below this line are only used in autonomous mode.
+  control: human
   bridge_host: 127.0.0.1      # where tools/chassis_velocity_bridge.py (project-otto) runs
   bridge_port: 47020
   control_rate_hz: 50

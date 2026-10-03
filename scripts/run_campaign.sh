@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Data collection. Run on the robot computer with ROS 2 and the Odin driver workspace sourced.
 #
-# Bring-up (run in this order the first time; nothing is recorded):
+# robot.control in config/campaign.yaml picks human driving (default: you drive with the remote,
+# the script guides and records) or autonomous driving (needs otto's mode + the MCB branch).
+#
+# Bring-up (run in this order the first time; nothing is recorded; jog/check only matter in
+# autonomous mode):
 #   scripts/run_campaign.sh find-mocap          list live mocap candidates -> paste into config
 #   scripts/run_campaign.sh mocap  [dir]        watch the configured mocap stream
 #   scripts/run_campaign.sh odin   [dir]        start/stop Odin, report its topics
