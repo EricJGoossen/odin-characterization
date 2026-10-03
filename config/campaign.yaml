@@ -83,7 +83,9 @@ driver:
     sendimu: 1
     senddtof: 1
   connect_timeout_s: 60       # wait this long for the first /odin1/imu message after launch
-  warmup_min: 20
+  # Thermal warm-up before collecting (protocol: 20 min). Disabled for speed: thermal effects
+  # (Tier 2) are ignored. Set back to 20 to follow the protocol.
+  warmup_min: 0
 
 # --------------------------------------------------------------------------- phases
 phases:

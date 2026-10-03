@@ -132,8 +132,9 @@ Each bring-up step isolates one link of the chain:
 3. standing at the operator spot (Phase 2),
 4. covering Odin on **COVER NOW** / **UNCOVER NOW** (Phase 5 outages, unless a shutter command is set).
 
-Everything else is autonomous: warm-up, calibration, SLAM map plus automatic save, session 1,
-holds, latency, 24 cold starts and outages. `--no-prompt` skips the steps that need a person.
+Everything else is autonomous: calibration, SLAM map plus automatic save, session 1,
+holds, latency, 24 cold starts and outages. The protocol's 20 min thermal warm-up is disabled
+for speed (`driver.warmup_min: 0`, thermal effects ignored); set it to 20 to restore it. `--no-prompt` skips the steps that need a person.
 After an abort, rerun the same command: finished steps are skipped (`--redo` repeats them).
 `day2` and `day3` each add one Phase 2 session.
 

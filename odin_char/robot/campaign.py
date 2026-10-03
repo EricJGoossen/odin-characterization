@@ -740,7 +740,7 @@ def main():
     ap.add_argument("--config", type=Path, default=Path(__file__).parents[2] / "config" / "campaign.yaml")
     ap.add_argument("--dir", type=Path, required=True, help="campaign directory (created if missing)")
     ap.add_argument("--no-prompt", action="store_true", help="skip steps that need a person")
-    ap.add_argument("--skip-warmup", action="store_true", help="testing only: the protocol requires the warm-up")
+    ap.add_argument("--skip-warmup", action="store_true", help="skip the warm-up even if driver.warmup_min > 0")
     ap.add_argument("--redo", action="store_true", help="repeat steps already marked done")
     args = ap.parse_args()
     cfg = yaml.safe_load(args.config.read_text())
