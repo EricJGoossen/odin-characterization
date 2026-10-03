@@ -9,6 +9,10 @@
 set -euo pipefail
 OTTO_DIR=${OTTO_DIR:-$HOME/project-otto}
 
+if systemctl is-active --quiet project_otto.service 2>/dev/null; then
+    echo "project_otto.service is running and owns the UART: sudo systemctl stop project_otto.service" >&2
+    exit 1
+fi
 if pgrep -f "project_otto/(new_)?main.py" >/dev/null; then
     echo "project otto's main loop is running and owns the UART: stop it first." >&2
     exit 1
