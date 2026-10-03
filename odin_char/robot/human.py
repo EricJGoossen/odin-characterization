@@ -10,6 +10,7 @@ manifest are the same as the autonomous campaign's, so `python -m odin_char.pipe
 from __future__ import annotations
 
 import select
+import shutil
 import sys
 import threading
 import time
@@ -53,8 +54,20 @@ class HumanCampaign(Campaign):
     def _stdin_ready_default() -> bool:
         return bool(select.select([sys.stdin], [], [], 0)[0])
 
+    @staticmethod
+    def _flush_typeahead():
+        """Drop keys typed before a prompt (an extra Enter must not confirm the NEXT prompt)."""
+        try:
+            import termios
+
+            if sys.stdin.isatty():
+                termios.tcflush(sys.stdin, termios.TCIFLUSH)
+        except (ImportError, OSError, ValueError):
+            pass
+
     def ask(self, text: str):
         """Instruction that needs a confirmation before anything is recorded."""
+        self._flush_typeahead()
         beep(2)
         print(f"\n>>> {text}\n    press Enter when ready... ", end="", flush=True)
         self._readline()
@@ -73,6 +86,7 @@ class HumanCampaign(Campaign):
 
         status(state) -> str; state carries pose, speed, distance, elapsed, and whatever `track`
         (called every tick with the state) accumulates."""
+        self._flush_typeahead()
         beep(1)
         print(f"\n>>> {instructions}")
         print("    press Enter when finished" + (f" (at least {min_s:.0f} s)" if min_s else ""), flush=True)
@@ -102,7 +116,8 @@ class HumanCampaign(Campaign):
                 beep(2)
                 st["target_beeped"] = True
                 line += "  [target reached: press Enter]"
-            sys.stdout.write("\r    " + line[:150].ljust(150))
+            width = max(20, shutil.get_terminal_size((120, 20)).columns - 5)  # never wrap
+            sys.stdout.write("\r    " + line[:width].ljust(width))
             sys.stdout.flush()
             if done is not None and done(st):
                 print()
@@ -410,22 +425,38 @@ class HumanCampaign(Campaign):
         self.mark("holds")
 
     def step_latency(self):
+        """Two parts (translate, rotate), resumable per part: a run records which parts it completed
+        (`latency_parts`); a restart only records the parts still missing."""
         ph = self.cfg["phases"]["phase4"]
-        self.ensure_tracking()
         seg = len(ph["frequencies_hz"]) * ph["seconds_per_frequency"]
+        done = set()
+        for run in self.manifest["runs"]:
+            if run["phase"] == "phase4" and not run.get("excluded"):
+                done |= set(run.get("latency_parts", []))
+        todo = [p for p in ("translate", "rotate") if p not in done]
+        if not todo:
+            self.mark("latency")
+            return
+        if done:
+            print(f"[latency: {', '.join(sorted(done))} already recorded; doing {', '.join(todo)}]")
+        self.ensure_tracking()
         self.ask("Latency test: park in an open area.")
-        r = self.new_run("latency", "phase4")
+        r = self.new_run("latency_" + "_".join(todo), "phase4", latency_parts=[])
+        parts = {
+            "translate": (f"Translate back and forth along the robot's forward axis (~20-40 cm, quick: 0.5 to 2 Hz, "
+                          f"vary it) for {seg:.0f} s. No turning.",
+                          lambda st: f"{st['elapsed']:4.0f}/{seg:.0f} s  speed {st['speed']:4.2f} m/s"),
+            "rotate": (f"Rotate back and forth in place (+-30-60 deg, 0.5 to 2 Hz, vary it) for {seg:.0f} s. "
+                       "No driving.",
+                       lambda st: f"{st['elapsed']:4.0f}/{seg:.0f} s  yaw rate {st['yaw_rate']:+5.2f} rad/s"),
+        }
 
         def body():
-            self.monitor(
-                f"Translate back and forth along the robot's forward axis (~20-40 cm, quick: 0.5 to 2 Hz, "
-                f"vary it) for {seg:.0f} s. No turning.",
-                lambda st: f"{st['elapsed']:4.0f}/{seg:.0f} s  speed {st['speed']:4.2f} m/s",
-                min_s=0.8 * seg, target_s=seg)
-            self.monitor(
-                f"Now rotate back and forth in place (+-30-60 deg, 0.5 to 2 Hz, vary it) for {seg:.0f} s. No driving.",
-                lambda st: f"{st['elapsed']:4.0f}/{seg:.0f} s  yaw rate {st['yaw_rate']:+5.2f} rad/s",
-                min_s=0.8 * seg, target_s=seg)
+            for p in todo:
+                text, status = parts[p]
+                self.monitor(text, status, min_s=0.8 * seg, target_s=seg)
+                r["latency_parts"].append(p)
+                self.save()
 
         self.record(r, body)
         self.mark("latency")
