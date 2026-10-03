@@ -729,7 +729,7 @@ class Campaign:
             if s not in self.BRINGUP + ["check", "session"] and self.done(s) and not redo:
                 print(f"[{s} already done; --redo to repeat]")
                 continue
-            if s == "session" and step in ("day2", "day3") and self.done(f"session_{step}"):
+            if s == "session" and step in self.CHAINS and self.done(f"session_{step}"):
                 print(f"[{step} session already recorded]")
                 continue
             print(f"\n================ {s} ================")

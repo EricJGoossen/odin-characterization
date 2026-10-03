@@ -368,7 +368,12 @@ class HumanCampaign(Campaign):
     def step_holds(self):
         ph = self.cfg["phases"]["phase3"]
         self.ensure_tracking()
+        held = {r.get("location") for r in self.manifest["runs"]
+                if r["phase"] == "phase3" and r.get("ended") and r["ended"] - r["started"] >= 0.9 * ph["hold_s"]}
         for i, loc in enumerate(ph["locations"]):
+            if f"L{i}" in held:
+                print(f"[hold spot {i + 1} already recorded]")
+                continue
             self.guide_to(loc, f"hold spot {i + 1}/{len(ph['locations'])}")
             print(f"    parked. Hands off for {ph['hold_s'] / 60:.0f} min (everyone stay still).")
             r = self.new_run(f"hold{i}", "phase3", location=f"L{i}")
