@@ -19,7 +19,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 STEP=${1:?usage: run_campaign.sh <find-mocap|mocap|odin|jog|check|day1|day2|day3|step> [campaign_dir] [flags]}
 shift
-command -v ros2 >/dev/null || { echo "source ROS 2 and the odin driver workspace first" >&2; exit 1; }
+# ROS 2 + the workspace with odin_ros_driver (ODIN_WS, default ~/odin_ws)
+set +u
+command -v ros2 >/dev/null || source /opt/ros/${ROS_DISTRO:-humble}/setup.bash
+ros2 pkg prefix odin_ros_driver >/dev/null 2>&1 || source "${ODIN_WS:-$HOME/odin_ws}/install/setup.bash"
+set -u
+ros2 pkg prefix odin_ros_driver >/dev/null 2>&1 || { echo "odin_ros_driver not found: set ODIN_WS to its workspace" >&2; exit 1; }
 if [ "$STEP" = "find-mocap" ]; then
     exec .venv/bin/python -m odin_char.robot.discover "$@"
 fi
