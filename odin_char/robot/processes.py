@@ -51,7 +51,9 @@ class OdinDriver:
         self.started_at: float | None = None
         self.mode: int | None = None
         self.events: dict[str, float] = {}
+        self.event_lines: dict[str, str] = {}
         self._watch = {
+            "map_save_target": "Map save triggered, will transfer to",
             "relocalized": self.cfg["relocalization_success_text"],
             "map_saved": self.cfg["map_saved_text"],
             "map_failed": "Map transfer failed",
@@ -70,6 +72,7 @@ class OdinDriver:
         if reloc_map is not None:
             keys["relocalization_map_abs_path"] = str(reloc_map)
         if map_dest is not None:
+            map_dest.mkdir(parents=True, exist_ok=True)  # lidar_save_map: "must already exist"
             keys["mapping_result_dest_dir"] = str(map_dest)
             keys["mapping_result_file_name"] = map_name or "map.bin"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +88,7 @@ class OdinDriver:
         self.log_path = log_path
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self.events = {}
+        self.event_lines = {}
         self.mode = mode
         self.started_at = time.time()
         self.proc = subprocess.Popen(shlex.split(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -100,6 +104,7 @@ class OdinDriver:
                 for key, text in self._watch.items():
                     if text in line and key not in self.events:
                         self.events[key] = now
+                        self.event_lines[key] = line.strip()
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -121,20 +126,24 @@ class OdinDriver:
             time.sleep(0.05)
         return None
 
-    def save_map(self, timeout: float = 600.0) -> bool:
+    def save_map(self, timeout: float | None = None) -> Path | None:
+        """Ask the device to generate and transfer its SLAM map. Returns the saved file (taken
+        from the driver's own "Map transfer completed: <path>" line), or None on failure/timeout."""
         svc = self.cfg["save_map_service"]
         r = subprocess.run(["ros2", "service", "call", svc, "odin_ros_driver/srv/SaveMap", "{value: 1}"],
                            capture_output=True, text=True, timeout=60)
         if r.returncode != 0 or "success=True" not in r.stdout.replace(" ", ""):
             raise RuntimeError(f"save_map service call failed: {r.stdout} {r.stderr}")
-        t_end = time.time() + timeout
+        t_end = time.time() + (timeout or float(self.cfg.get("save_map_timeout_s", 600)))
         while time.time() < t_end:
             if "map_saved" in self.events:
-                return True
+                line = self.event_lines.get("map_saved", "")
+                path = line.split(self.cfg["map_saved_text"], 1)[-1].strip(" :")
+                return Path(path) if path else None
             if "map_failed" in self.events:
-                return False
+                return None
             time.sleep(0.5)
-        return False
+        return None
 
     def device_serial(self) -> str:
         p = expand(self.cfg.get("calib_yaml"))

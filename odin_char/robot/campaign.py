@@ -287,6 +287,21 @@ class Campaign:
             fix = self.relocalize(tout)
         return t_launch, fix
 
+    def save_map_into_campaign(self) -> Path:
+        """Save Odin's SLAM map and keep a copy at <campaign>/maps/map.bin (the driver logs where it
+        really wrote the file; it may differ from the configured folder)."""
+        print("saving map (the device generates it first; this can take a few minutes) ...")
+        saved = self.driver.save_map()
+        target = self.driver.event_lines.get("map_save_target", "")
+        if saved is None or not saved.exists():
+            raise Abort(f"map save failed ({target or 'no save started'}); see {self.driver.log_path}")
+        mp = self.root / "maps" / "map.bin"
+        mp.parent.mkdir(parents=True, exist_ok=True)
+        if saved.resolve() != mp.resolve():
+            shutil.copy2(saved, mp)
+        print(f"map saved: {saved}" + ("" if saved.resolve() == mp.resolve() else f" (copied to {mp})"))
+        return mp
+
     def standard_motion(self):
         p = self.pose()
         fwd = [p[0] + np.cos(p[2]), p[1] + np.sin(p[2]), p[2]]
@@ -498,12 +513,7 @@ class Campaign:
         start_pose = self.pose()
         r = self.new_run("mapping", "mapping")
         self.record(r, lambda: self.execute(tr, "mapping"))
-        print("saving map ...")
-        if not self.driver.save_map():
-            raise Abort(f"map save failed; see {self.driver.log_path}")
-        mp = self.root / "maps" / "map.bin"
-        if not mp.exists():
-            raise Abort(f"map file not found at {mp}")
+        mp = self.save_map_into_campaign()
         self.state.update(map_path=str(mp), map_sha256=sha256(mp), mapping_start_pose=start_pose.tolist(),
                           mapping_trajectory=np.column_stack([tr.xy, tr.yaw])[::20].tolist())
         self.driver.stop()

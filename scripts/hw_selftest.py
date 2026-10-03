@@ -23,6 +23,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", type=Path, default=Path("/tmp/odin_itest"))
     ap.add_argument("--config", type=Path, default=ROOT / "config" / "campaign.yaml")
+    ap.add_argument("--save-timeout", type=float, default=180.0, help="seconds to wait for map generation")
     args = ap.parse_args()
     import sys
 
@@ -39,6 +40,7 @@ def main():
         results.append((name, ok))
         print(f"[{'PASS' if ok else 'FAIL'}] {name} {detail}", flush=True)
 
+    cfg["driver"]["save_map_timeout_s"] = args.save_timeout
     c = HumanCampaign(cfg, args.dir, prompts=True, skip_warmup=True)
     logs = args.dir / "logs"
     try:
@@ -50,12 +52,22 @@ def main():
         time.sleep(8)
         c.rec.stop()
         check("bag recorded (SLAM)", (bag1 / "metadata.yaml").exists())
-        ok = c.driver.save_map(timeout=300)
         mp = args.dir / "maps" / "map.bin"
-        check("map saved via /odin1/save_map", ok and mp.exists(), f"{mp} {mp.stat().st_size if mp.exists() else 0} B")
+        try:
+            c.save_map_into_campaign()
+        except Exception as e:  # noqa: BLE001
+            print("   ", e)
+        target = c.driver.event_lines.get("map_save_target", "(no 'will transfer to' line)")
+        check("save target is the campaign maps/ folder", str(args.dir / "maps") in target, target)
+        check("map generated + saved via /odin1/save_map", mp.exists(),
+              f"{mp.stat().st_size if mp.exists() else 0} B (a stationary robot may never finish generating)")
         c.driver.stop()
         if not mp.exists():
-            raise SystemExit("cannot continue without a map")
+            fallback = sorted(Path("~/odin_ws/src/odin_ros_driver/map").expanduser().rglob("*.bin"))
+            if not fallback:
+                raise SystemExit("cannot continue without a map")
+            print(f"    continuing with an existing map for the relocalization test: {fallback[-1]}")
+            mp = fallback[-1]
         c.state["map_path"] = str(mp)
 
         # relocalization mode on that map

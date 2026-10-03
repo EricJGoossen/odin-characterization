@@ -61,10 +61,12 @@ class FakeDriver(OdinDriver):
         self.mode = None
 
     def save_map(self, timeout=600.0):
-        p = self.root / "maps"
+        # like the real driver, which may write somewhere other than the configured folder
+        p = self.root / "driver_default_maps"
         p.mkdir(exist_ok=True)
-        (p / "map.bin").write_bytes(b"map")
-        return True
+        (p / "map_20261002.bin").write_bytes(b"map")
+        self.event_lines["map_save_target"] = f"Map save triggered, will transfer to [{p}/map_20261002.bin]"
+        return p / "map_20261002.bin"
 
 
 class FakeRec:

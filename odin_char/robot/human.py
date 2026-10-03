@@ -221,12 +221,8 @@ class HumanCampaign(Campaign):
             f"then {ph['loops']} loops around the edge. Aim for > 90% coverage.",
             lambda st: f"coverage {100 * visited.mean():5.1f}%  driven {st['dist']:6.1f} m  speed {st['speed']:4.2f} m/s",
             min_s=30, track=track))
-        print("saving map ...")
-        if not self.driver.save_map():
-            raise Abort(f"map save failed; see {self.driver.log_path}")
-        mp = self.root / "maps" / "map.bin"
-        if not mp.exists():
-            raise Abort(f"map file not found at {mp}")
+        self.ask("Stop the robot and keep it still while the map is generated and saved.")
+        mp = self.save_map_into_campaign()
         from .processes import sha256
 
         if len(path) < 10:
