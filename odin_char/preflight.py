@@ -22,12 +22,34 @@ def _compare(a, b, name: str, alpha: float = 0.01, min_rel: float = 0.05) -> dic
 def odin_side(mocap_on: BagData, mocap_off: BagData) -> list[dict]:
     """Odin cloud statistics with mocap strobes on vs off."""
     out = [
-        _compare(mocap_on.cloud_n, mocap_off.cloud_n, "cloud_raw point count"),
+        _compare(mocap_on.cloud_valid, mocap_off.cloud_valid, "cloud_raw valid points per cloud"),
+        _compare(mocap_on.cloud_range_mean, mocap_off.cloud_range_mean, "mean range of valid points (m)"),
         _compare(mocap_on.cloud_plane_std, mocap_off.cloud_plane_std, "flat-wall range noise (m)"),
     ]
+    out.append(_pixel_noise(mocap_on, mocap_off))
     for f in sorted(set(mocap_on.cloud_field_mean) & set(mocap_off.cloud_field_mean)):
         out.append(_compare(mocap_on.cloud_field_mean[f], mocap_off.cloud_field_mean[f], f"mean point {f}"))
     return out
+
+
+def _pixel_noise(on: BagData, off: BagData, min_rel: float = 0.10) -> dict:
+    """Static scene: per-pixel temporal range std, compared on the pixels valid in both runs."""
+    if on.px_cnt is None or off.px_cnt is None or len(on.px_cnt) != len(off.px_cnt):
+        return {"metric": "per-pixel range noise (m)", "status": "not recorded"}
+    both = (on.px_cnt >= 20) & (off.px_cnt >= 20)
+    if both.sum() < 100:
+        return {"metric": "per-pixel range noise (m)", "status": "too few common pixels"}
+
+    def std(b):
+        m = b.px_sum[both] / b.px_cnt[both]
+        return np.sqrt(np.maximum(b.px_sumsq[both] / b.px_cnt[both] - m * m, 0.0))
+
+    s_on, s_off = std(on), std(off)
+    p = float(stats.wilcoxon(s_on, s_off).pvalue)
+    med_on, med_off = float(np.median(s_on)), float(np.median(s_off))
+    rel = abs(med_on - med_off) / (med_off + 1e-12)
+    return {"metric": "per-pixel range noise (m), median over pixels", "on_mean": med_on, "off_mean": med_off,
+            "rel_diff": rel, "p": p, "pixels": int(both.sum()), "significant": bool(p < 0.01 and rel > min_rel)}
 
 
 def mocap_side(odin_on: BagData, odin_off: BagData, expected_markers: int | None) -> list[dict]:

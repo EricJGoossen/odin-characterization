@@ -41,6 +41,19 @@ class BagData:
     cloud_t: list = field(default_factory=list)
     cloud_n: list = field(default_factory=list)
     cloud_plane_std: list = field(default_factory=list)
+    cloud_valid: list = field(default_factory=list)  # valid (finite, non-zero) points per cloud
+    cloud_range_mean: list = field(default_factory=list)
+    px_sum: np.ndarray | None = None  # per-pixel range sums over the bag (organized clouds)
+    px_sumsq: np.ndarray | None = None
+    px_cnt: np.ndarray | None = None
+
+    def pixel_range_std(self, min_count: int = 20) -> np.ndarray:
+        """Temporal range std of every pixel seen in >= min_count clouds (static-scene noise)."""
+        if self.px_cnt is None:
+            return np.zeros(0)
+        ok = self.px_cnt >= min_count
+        m = self.px_sum[ok] / self.px_cnt[ok]
+        return np.sqrt(np.maximum(self.px_sumsq[ok] / self.px_cnt[ok] - m * m, 0.0))
     cloud_field_mean: dict = field(default_factory=lambda: defaultdict(list))
     marker_t: list = field(default_factory=list)
     marker_n: list = field(default_factory=list)
@@ -123,13 +136,25 @@ def _cloud_stats(msg, roi, data: BagData):
     xyz = np.stack(
         [buf[:, offsets[k] : offsets[k] + 4].copy().view("<f4")[:, 0] for k in "xyz"], axis=1
     )
-    for name in names:
-        if name in ("x", "y", "z"):
+    rng = np.linalg.norm(xyz, axis=1)
+    valid = np.isfinite(rng) & (rng > 0.05)
+    data.cloud_valid.append(int(valid.sum()))
+    data.cloud_range_mean.append(float(rng[valid].mean()) if valid.any() else np.nan)
+    # organized cloud of fixed size: per-pixel range statistics over time (static-scene noise)
+    if data.px_sum is None or len(data.px_sum) != n:
+        data.px_sum, data.px_sumsq, data.px_cnt = np.zeros(n), np.zeros(n), np.zeros(n)
+    r = np.where(valid, rng, 0.0)
+    data.px_sum += r
+    data.px_sumsq += r * r
+    data.px_cnt += valid
+    numeric = {2: "u1", 4: "<u2", 6: "<u4", 1: "i1", 3: "<i2", 5: "<i4", 7: "<f4", 8: "<f8"}
+    for f in msg.fields:
+        if f.name in ("x", "y", "z") or f.datatype not in numeric:
             continue
-        f = next(f for f in msg.fields if f.name == name)
-        if f.datatype == 7:  # FLOAT32
-            vals = buf[:, f.offset : f.offset + 4].copy().view("<f4")[:, 0]
-            data.cloud_field_mean[name].append(float(np.nanmean(vals)))
+        dt = np.dtype(numeric[f.datatype])
+        vals = buf[:, f.offset : f.offset + dt.itemsize].copy().view(dt)[:, 0].astype(float)
+        if valid.any():
+            data.cloud_field_mean[f.name].append(float(np.nanmean(vals[valid])))
     if roi is None:
         data.cloud_plane_std.append(np.nan)
         return
