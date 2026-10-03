@@ -99,7 +99,18 @@ driver:
     sendodom: 1
     send_odom_baselink_tf: 1
     sendimu: 1
-    senddtof: 1
+    senddtof: 1               # raw cloud (Phase 0 preflight, outage timing)
+    # Off: with these on, the sentry Jetson's driver dropped ODOMETRY / TF_ODOM queue entries
+    # ("Queue ... is full", 2026-10-03), which would show up as fake latency and gaps. None of
+    # them are used by the analysis.
+    sendrgb: 0
+    sendrgbcompressed: 0
+    sendrgbundistort: 0
+    sendcloudslam: 0
+    sendcloudrender: 0
+    senddepth: 0
+    sendreprojection: 0
+    sendoverlay: 0
   connect_timeout_s: 60       # wait this long for the first /odin1/imu message after launch
   # Thermal warm-up before collecting (protocol: 20 min). Disabled for speed: thermal effects
   # (Tier 2) are ignored. Set back to 20 to follow the protocol.
