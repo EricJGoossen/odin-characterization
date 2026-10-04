@@ -49,7 +49,8 @@ class ValidationResult:
 
 
 def validate(model: Tier0Model, held: ErrorTable, n_mc: int = 50, real_lost_events: int = 0,
-             seed: int = 0, acf_tau_multiple: float = 5.0, band=(5, 95)) -> ValidationResult:
+             seed: int = 0, acf_tau_multiple: float = 5.0, band=(5, 95), instance: np.ndarray | None = None,
+             registration_scale: float = 1.0) -> ValidationResult:
     rng = np.random.default_rng(seed)
     dt = model.dt
     # rank tests need enough realisations to be able to reach the per-axis level at all
@@ -68,7 +69,8 @@ def validate(model: Tier0Model, held: ErrorTable, n_mc: int = 50, real_lost_even
     sims_rmse, sims_acf, sims_rpe, sims_q, pooled = [], [], [], [], [[] for _ in range(6)]
     qs = np.linspace(0.05, 0.95, 19)
     for _ in range(n_mc):
-        sim = model.simulate_error(held.pos_M, held.speed, held.yaw_rate, segs, rng, parameter_uncertainty=True)
+        sim = model.simulate_error(held.pos_M, held.speed, held.yaw_rate, segs, rng, parameter_uncertainty=True,
+                                   heading=held.heading, instance=instance, registration_scale=registration_scale)
         sims_rmse.append(np.sqrt(np.mean(sim[idx] ** 2, axis=0)))
         sims_acf.append([segment_acf([sim[s, a] for s in segs], max_lag) for a in range(6)])
         sims_rpe.append(rpe_curve(held, held.world_position_error(sim), dt))

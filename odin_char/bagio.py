@@ -78,21 +78,101 @@ class BagData:
 
     mocap_clock: str = "host"  # "server": mocap stamps come from the mocap server's clock
     mocap_clock_model: dict = field(default_factory=dict)
+    mocap_clean: bool = True  # drop re-published frames and back-date burst deliveries
+    mocap_clean_stats: dict = field(default_factory=dict)
+    mocap_lowpass_hz: float | None = None  # zero-phase truth low-pass (set from analysis.truth_lowpass_hz)
 
-    def mocap_series(self) -> PoseSeries:
+    def mocap_series(self, lowpass: bool = True) -> PoseSeries:
         """Mocap poses on the host clock.
 
         With mocap_clock == "server" the stamps are mapped to the host clock with a per-bag
         offset + drift model fitted to the lower envelope of (arrival - stamp): the minimum
         network delay is (nearly) constant, so the envelope tracks the clock offset. The leftover
-        constant (minimum delay) is absorbed by the Phase 1 IMU/mocap time offset."""
+        constant (minimum delay) is absorbed by the Phase 1 IMU/mocap time offset.
+
+        lowpass: apply the zero-phase truth filter (mocap_lowpass_hz). The marker body vibrates
+        at ~8 Hz with the motors energised (odin1: 5-7 mrad rms) while Odin's 10 Hz output can
+        represent nothing above 5 Hz; unfiltered, that vibration is scored as Odin error."""
+        key = (lowpass and bool(self.mocap_lowpass_hz), self.mocap_lowpass_hz, self.mocap_clean, self.mocap_clock)
+        memo = self.__dict__.setdefault("_mocap_memo", {})
+        if key in memo:
+            return memo[key]
         if len(self.mocap.t_stamp) < 2:
             raise KeyError(f"no mocap data in {self.path}")
         s = self.mocap.series(False)
-        if self.mocap_clock != "server":
-            return s
-        a, b, t0 = self.fit_mocap_clock()
-        return PoseSeries(s.t + a + b * (s.t - t0), s.pose)
+        if self.mocap_clean:
+            s = self._clean_mocap(s)
+        if self.mocap_clock == "server":
+            a, b, t0 = self.fit_mocap_clock()
+            s = PoseSeries(s.t + a + b * (s.t - t0), s.pose)
+        if key[0]:
+            s = lowpass_series(s, self.mocap_lowpass_hz)
+        memo[key] = s
+        return s
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state.pop("_mocap_memo", None)
+        return state
+
+    def _clean_mocap(self, s: PoseSeries, window: int = 64, burst_s: float = 0.025,
+                     gap_s: float = 0.02) -> PoseSeries:
+        """Repair two delivery artefacts seen with vrpn_mocap (campaign odin1, 2026-10-03):
+
+        * duplicates: two client nodes publishing the same server stream put every frame on the
+          topic twice. A frame whose pose is bit-identical to one of the previous `window` samples
+          is a re-publication (real measurements always differ in the last float bits) and is
+          dropped; the first arrival is kept.
+        * bursts: the server delivers 3-4 frames per packet every ~10 ms and the client stamps
+          them on arrival, so stamps within a burst are ~0.1 ms apart instead of one frame period.
+          Frames are consecutive captures at a fixed rate, so frame k was captured no later than
+          t_j - (j - k) * dt for every later frame j in the same delivery stream; the minimum of
+          these bounds over the next `burst_s` (stopping at gaps > `gap_s`) back-dates each frame
+          to its capture time up to the constant minimum delay.
+        """
+        t, P = s.t, s.pose
+        key = np.column_stack([P.p, P.R.reshape(len(t), 9)])
+        keep = np.ones(len(t), bool)
+        recent: dict[bytes, int] = {}
+        for i in range(len(t)):
+            k = key[i].tobytes()
+            j = recent.get(k)
+            if j is not None and i - j <= window:
+                keep[i] = False
+                continue
+            recent[k] = i
+            if len(recent) > 4 * window:
+                recent = {kk: jj for kk, jj in recent.items() if i - jj <= window}
+        t = t[keep]
+        P = P[keep]
+        o = np.argsort(t, kind="stable")
+        t, P = t[o], P[o]
+        dt_all = np.diff(t)
+        # frame period: count / span over 1 s windows without gaps
+        rates = []
+        for w0 in np.arange(t[0], t[-1] - 1.0, 1.0):
+            i0, i1 = np.searchsorted(t, [w0, w0 + 1.0])
+            if i1 - i0 > 50 and dt_all[i0:i1 - 1].max() < gap_s:
+                rates.append((i1 - i0 - 1) / (t[i1 - 1] - t[i0]))
+        dt = 1.0 / float(np.median(rates)) if rates else float(np.median(dt_all))
+        tc = t.copy()
+        brk = np.concatenate([dt_all > gap_s, [True]])  # brk[i]: gap right after sample i
+        n = len(t)
+        alive = np.ones(n, bool)
+        for m in range(1, int(burst_s / dt) + 3):
+            alive[: n - m] &= ~brk[m - 1 : n - 1]  # no gap between k and k + m
+            alive[n - m :] = False
+            idx = np.nonzero(alive[: n - m])[0]
+            idx = idx[t[idx + m] - t[idx] <= burst_s]
+            tc[idx] = np.minimum(tc[idx], t[idx + m] - m * dt)
+        self.mocap_clean_stats = {
+            "raw": int(len(keep)), "duplicates": int((~keep).sum()), "rate_hz": 1.0 / dt,
+            "backdate_median_ms": float(np.median(t - tc) * 1e3),
+            "backdate_p99_ms": float(np.percentile(t - tc, 99) * 1e3),
+            "nonmonotonic": int((np.diff(tc) <= 0).sum()),
+        }
+        o = np.argsort(tc, kind="stable")
+        return PoseSeries(tc[o], P[o])
 
     def fit_mocap_clock(self, window_s: float = 5.0) -> tuple[float, float, float]:
         ts = np.asarray(self.mocap.t_stamp)
@@ -114,6 +194,39 @@ class BagData:
                                   "delay_median_ms": float(np.median(resid) * 1e3),
                                   "delay_p99_ms": float(np.percentile(resid, 99) * 1e3)}
         return float(a), float(b), t0
+
+
+def lowpass_series(s: PoseSeries, fc: float, gap_s: float = 0.02, min_len: int = 64) -> PoseSeries:
+    """Zero-phase Butterworth low-pass (4th order effective) of a pose series, per gap-free
+    stretch, resampled on a uniform grid at the series' own rate. Rotations are filtered as
+    sign-continuous quaternions and renormalised (fine for the small in-window changes here)."""
+    from scipy.signal import butter, sosfiltfilt
+    from scipy.spatial.transform import Rotation
+
+    t = s.t
+    dt = np.diff(t)
+    fs = 1.0 / float(np.median(dt))
+    sos = butter(2, fc, fs=fs, output="sos")
+    brk = np.where(dt > gap_s)[0] + 1
+    ts, ps, qs = [], [], []
+    for seg in np.split(np.arange(len(t)), brk):
+        sub = PoseSeries(t[seg], s.pose[seg]) if len(seg) > 1 else None
+        if sub is None or len(seg) < min_len:
+            ts.append(t[seg])
+            ps.append(s.pose.p[seg])
+            qs.append(Rotation.from_matrix(s.pose.R[seg]).as_quat())
+            continue
+        tu = np.arange(t[seg[0]], t[seg[-1]] + 0.5 / fs, 1.0 / fs)
+        tu = tu[tu <= t[seg[-1]]]
+        P, _ = sub.interp(tu)
+        q = Rotation.from_matrix(P.R).as_quat()
+        flips = np.cumprod(np.concatenate([[1.0], np.sign(np.sum(q[1:] * q[:-1], axis=1) + 1e-300)]))
+        q = q * flips[:, None]
+        q = sosfiltfilt(sos, q, axis=0)
+        ts.append(tu)
+        ps.append(sosfiltfilt(sos, P.p, axis=0))
+        qs.append(q / np.linalg.norm(q, axis=1, keepdims=True))
+    return PoseSeries(np.concatenate(ts), Pose.from_quat(np.concatenate(ps), np.concatenate(qs)))
 
 
 def _xyz(v):

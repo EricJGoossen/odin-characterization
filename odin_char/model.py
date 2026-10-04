@@ -1,6 +1,7 @@
 """The fitted Tier 0 model and a simulator for it (used by Phase 6 and by the sim team).
 
-eps = eps_s(p) + eta (+ latency: the output is the pose delayed by tau_d)
+eps = b + eps_s(p) + eta (+ latency: the output is the pose delayed by tau_d)
+b: map-frame registration offset, one draw per relocalization (registration.py)
 eta per body-aligned axis: AR(1) with Student-t innovations, separate moving/stationary fits.
 """
 from __future__ import annotations
@@ -37,6 +38,8 @@ class Tier0Model:
     events: dict = field(default_factory=dict)
     moving_speed_threshold: float = 0.05
     tau_d_stderr: float = 0.0
+    registration_sigma: np.ndarray | None = None  # map-frame (x, y, z, rx, ry, rz), per relocalization
+    registration: dict = field(default_factory=dict)  # fit details for the export
 
     # ------------------------------------------------------------------ simulation
     def _innovation(self, p: AxisParams, rng, size):
@@ -90,12 +93,32 @@ class Tier0Model:
         return eta
 
     def simulate_error(self, pos: np.ndarray, speed: np.ndarray, yaw_rate: np.ndarray,
-                       segments: list[np.ndarray], rng, parameter_uncertainty: bool = False) -> np.ndarray:
+                       segments: list[np.ndarray], rng, parameter_uncertainty: bool = False,
+                       heading: np.ndarray | None = None, instance: np.ndarray | None = None,
+                       registration_scale: float = 1.0) -> np.ndarray:
         """Body-aligned error seen by a consumer along a true trajectory (includes latency).
 
         parameter_uncertainty: also draw tau_d and eps_s from their estimation uncertainty
-        (used for hold-out validation bands; the sim itself uses the point estimates)."""
+        (used for hold-out validation bands; the sim itself uses the point estimates).
+        heading / instance: track heading per sample and relocalization id per sample; with both
+        given and a registration term fitted, one map-frame offset is drawn per relocalization.
+        registration_scale multiplies its variance (hold-out validation: the reference alignment
+        itself came from a finite number of relocalizations)."""
         eps = self.simulate_eta(speed > self.moving_speed_threshold, segments, rng)
+        if self.registration_sigma is not None and heading is not None:
+            from .registration import MAP_AXES, sample_track
+
+            inst = np.zeros(len(speed), int) if instance is None else instance
+            sig = np.asarray(self.registration_sigma)
+            n = self.registration.get("n_instances", 0)
+            if parameter_uncertainty and n > 1:
+                # sigma_b comes from n relocalization means: draw it from its scaled-inverse-chi^2
+                # posterior (on the raw spread, then remove the FOGM part as in the point estimate)
+                raw = np.array([self.registration["sigma_raw_spread"][a] for a in MAP_AXES])
+                noise = np.array([self.registration["fogm_part_removed"][a] for a in MAP_AXES])
+                k = n - 1
+                sig = np.sqrt(np.maximum(k * raw**2 / rng.chisquare(k, 6) - noise**2, 0.0))
+            eps += sample_track(sig, heading, inst, rng, registration_scale)
         if self.static_field is not None:
             eps += self.static_field.sample(pos, rng) if parameter_uncertainty else self.static_field.predict(pos)
         tau = self.tau_d + (self.tau_d_stderr * rng.standard_normal() if parameter_uncertainty else 0.0)
@@ -134,6 +157,13 @@ class Tier0Model:
                 "grid_resolution": sf.res,
                 "cross_session_r2": dict(zip(AXES, [None if not np.isfinite(r) else float(r) for r in sf.r2])),
                 "grid_file": "static_field_grid.npz",
+            },
+            "registration": None
+            if self.registration_sigma is None
+            else {
+                "sigma": dict(zip(["x", "y", "z", "rx", "ry", "rz"], [float(v) for v in self.registration_sigma])),
+                "frame": "map; one N(0, sigma^2) offset per relocalization, constant until the next",
+                **{k: v for k, v in self.registration.items() if k in ("n_instances", "sigma_ci95", "sigma_mad")},
             },
             "events": self.events,
             "moving_speed_threshold": self.moving_speed_threshold,

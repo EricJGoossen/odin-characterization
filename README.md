@@ -193,6 +193,13 @@ Outputs per campaign: `bags/`, `logs/` (driver logs and per-run config copies), 
 * `results.json`
 * `figures/`
 
+Helpers for a downloaded campaign:
+
+* `scripts/reindex_bag.py <bag> ...` rebuilds `metadata.yaml` for bags whose recorder was killed
+  (power cut). Run it on every bag before analysing; intact bags are left alone.
+* `scripts/run_bias.py <campaign>` prints the mean error of every run and relocalization
+  (after `analyze.sh`, from `results/calibration.json`).
+
 ## Safety
 
 The robot moves only while the remote is in left UP / right MID. The campaign stops it when:
@@ -221,6 +228,15 @@ when a motor is offline.
   reported too.
 * **INIT offsets:** distance to the nearest point of the mapping path; the achieved values are
   logged.
+* **Mocap cleaning:** repeated frames (a second vrpn client on the topic) are dropped, and frames
+  delivered in bursts are back-dated to their capture rate. The truth is then low-passed at 4 Hz,
+  zero phase (`analysis.truth_lowpass_hz`), because the sentry's marker body vibrates at ~8 Hz
+  with the motors on.
+* **Registration term** (`analysis.registration_term`): Odin sets odom→map when it relocalizes
+  and barely corrects it afterwards, so each relocalization carries one constant map-frame
+  offset. It is removed before the FOGM and static-field fits and modelled as
+  b ~ N(0, σ_b²) per relocalization. Fixes more than 20 cm / 5° off are counted as wrong fixes.
+* **Hold-out:** T_WM and σ_b are refitted without the held-out session.
 
 ## Tests
 

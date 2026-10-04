@@ -166,6 +166,31 @@ def write_report(res_dir: Path, out: dict, model, figs: dict, eta, tab):
     else:
         L.append(f"- {p3.get('status')}")
 
+    rg = out.get("registration", {})
+    L += ["", "## Registration offset per relocalization"]
+    if "sigma" in rg:
+        s, ci = rg["sigma"], rg["sigma_ci95"]
+        L += [f"- {rg['n_instances']} relocalizations; one constant map-frame offset each (removed before the FOGM / static-field fits above)",
+              "- sigma_b: " + ", ".join(
+                  f"{a} {_f(s[a] * (100 if a in 'xyz' else 57.2958))} {'cm' if a in 'xyz' else 'deg'} "
+                  f"[{_f(ci[a][0] * (100 if a in 'xyz' else 57.2958))}, {_f(ci[a][1] * (100 if a in 'xyz' else 57.2958))}]"
+                  for a in s),
+              "", "| instance | runs | duration (s) | x cm | y cm | z cm | rx deg | ry deg | rz deg |", "|---|---|---|---|---|---|---|---|---|"]
+        for b in rg["instances"]:
+            m = b["mean"]
+            L.append(f"| {b['instance']} | {', '.join(b.get('run_names', map(str, b['runs'])))} | {_f(b['duration_s'], '{:.0f}')} | "
+                     + " | ".join(_f(m[a] * (100 if a in "xyz" else 57.2958), "{:+.1f}" if a in "xyz" else "{:+.2f}") for a in m) + " |")
+        for w in rg.get("wrong_fixes", []):
+            m = w["mean"]
+            L.append(f"| **wrong fix** {w['instance']} | {', '.join(w.get('run_names', map(str, w['runs'])))} | {_f(w['duration_s'], '{:.0f}')} | "
+                     + " | ".join(_f(m[a] * (100 if a in "xyz" else 57.2958), "{:+.1f}" if a in "xyz" else "{:+.2f}") for a in m) + " |")
+        if rg.get("wrong_fixes"):
+            lo, hi = rg["p_wrong_fix_ci95"]
+            L.append(f"- wrong fixes (> 20 cm or > 5 deg from the median registration, excluded from sigma_b): {len(rg['wrong_fixes'])} of "
+                     f"{len(rg['wrong_fixes']) + rg['n_instances']} -> p_wrong_fix {_f(rg['p_wrong_fix'])} (95% CI {_f(lo)}-{_f(hi)})")
+    else:
+        L.append(f"- {rg.get('status', 'not fitted')}")
+
     p4 = out.get("phase4", {})
     L += ["", "## Phase 4: latency cross-check",
           f"- {_box(p4.get('pass'))} xcorr tau_d {_f(p4.get('tau_d_xcorr', np.nan) * 1000)} ms vs Phase 2 {_f(p4.get('tau_d_phase2', np.nan) * 1000)} ms "
@@ -187,12 +212,17 @@ def write_report(res_dir: Path, out: dict, model, figs: dict, eta, tab):
         L.append(f"- Induced outages: {r['n_recovered']}/{r['n_trials']} recovered, lambda_rec = {_f(r['lambda_rec'])} /s")
         for k, v in r["by_cover_duration"].items():
             L.append(f"  - {k} s cover: max error {_f(v['max_err_mean'])} m, growth {_f(v['err_growth_mps'])} m/s, recover {v['recover_s']}")
+    if "outage_reregistration" in p5:
+        L.append("- Covering the window: pose output gap and offset change (after vs before):")
+        for r in p5["outage_reregistration"]:
+            L.append(f"  - {r['run']} ({r['cover_s']} s cover): output stops {_f(r['output_gap_s'], '{:.1f}')} s, "
+                     f"offset moves {_f(r['jump_pos_m'] * 100, '{:.1f}')} cm / {_f(r['jump_rot_deg'], '{:.2f}')} deg")
 
     p6 = out.get("phase6", {})
     L += ["", "## Phase 6: hold-out validation"]
     if "metrics" in p6:
         m = p6["metrics"]
-        L.append(f"- held-out session: {p6['held_out_session']}")
+        L.append(f"- held-out session: {p6['held_out_session']} (T_WM and all parameters refitted without it; {p6.get('registration')})")
         L.append(f"- {_box(all(v['pass'] for v in m['rmse'].values()))} RMSE per axis inside simulated 5-95% band")
         L.append(f"- {_box(all(v['pass'] for v in m['cdf'].values()))} error CDF / QQ (KS p: "
                  + ", ".join(f"{a} {_f(v['ks_p'])}" for a, v in m["cdf"].items()) + ")")

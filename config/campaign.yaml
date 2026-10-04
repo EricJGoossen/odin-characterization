@@ -173,6 +173,13 @@ analysis:
   t_loglik_threshold: 10
   mc_realizations: 200        # protocol: 50+; rank tests across 6 axes need >= 180
   # holdout_session: s3      # default: last session
+  # zero-phase low-pass on the mocap truth (Hz; null = off). Odin's 10 Hz output cannot follow
+  # anything above 5 Hz, and the sentry's marker body vibrates at ~8 Hz with the motors on.
+  truth_lowpass_hz: 4.0
+  # one constant map-frame offset per relocalization (Odin sets odom->map when it relocalizes
+  # and then barely corrects it); removed before the FOGM / static-field fits and simulated as
+  # b ~ N(0, sigma_b^2) per relocalization
+  registration_term: true
 
 # Optional: CAD / mount geometry for base_link -> Odin IMU ([tx ty tz rx ry rz], rotation vector).
 # Pins directions planar driving cannot observe (e.g. the vertical lever arm).

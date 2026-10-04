@@ -65,7 +65,7 @@ def mocap_side(odin_on: BagData, odin_off: BagData, expected_markers: int | None
         out.append({"metric": "marker residuals / ghost markers", "status": "not in bag: check in the mocap software"})
 
     def jitter(b: BagData):
-        s = b.mocap_series()
+        s = b.mocap_series(lowpass=False)  # the jitter itself is what is compared
         return np.linalg.norm(s.pose.p - np.median(s.pose.p, axis=0), axis=1)
 
     try:

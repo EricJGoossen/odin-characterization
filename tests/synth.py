@@ -227,7 +227,14 @@ def make_campaign(root: Path, seed: int = 1, laps: int = 12, short: bool = False
     tr = Truth()
     cfg = yaml.safe_load((Path(__file__).parents[1] / "config" / "campaign.yaml").read_text())
     cfg["analysis"]["mc_realizations"] = 20 if short else 50
+    cfg["analysis"]["truth_lowpass_hz"] = None  # synthetic truth has no marker-body vibration
+    # synthetic odom->map absorbs the whole error at every sample (no per-relocalization offset in
+    # the truth); the registration term is covered by tests/test_registration.py
+    cfg["analysis"]["registration_term"] = False
     cfg["hand_eye_prior"] = {"X": [0.1, 0.0, 0.33, 0.0, 0.0, 0.5], "prior_sigma_t": 0.05, "prior_sigma_rot_deg": 10}
+    # synthetic mocap is a tf stream on a server clock, independent of the room's real mocap setup
+    cfg["mocap"] = {"source": "tf", "topic": "/tf", "parent_frame": "mocap", "child_frame": "base_link",
+                    "clock": "server", "qos": "best_effort"}
     frames = {**cfg["frames"], "mocap_world": cfg["mocap"]["parent_frame"], "mocap_body": cfg["mocap"]["child_frame"]}
     root.mkdir(parents=True, exist_ok=True)
     (root / "campaign.yaml").write_text(yaml.safe_dump(cfg))

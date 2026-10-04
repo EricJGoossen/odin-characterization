@@ -18,6 +18,7 @@ import yaml
 
 from . import events as ev
 from . import preflight
+from . import registration as reg
 from .bagio import BagData, read_bag
 from .calib import (
     align_map_to_mocap,
@@ -65,6 +66,8 @@ class Campaign:
         self.dt = 1.0 / self.rate
         self.use_arrival = a.get("latency_reference", "stamp") == "arrival"
         self.grid_res = a.get("static_field_grid_m", 0.35)
+        self.truth_lowpass_hz = a.get("truth_lowpass_hz")
+        self.use_registration = bool(a.get("registration_term", True))
         self.min_bin = a.get("static_field_min_samples", 5)
 
     def runs_of(self, phase: str) -> list[dict]:
@@ -73,13 +76,19 @@ class Campaign:
         return [r for r in self.manifest["runs"] if r["phase"] == phase and not r.get("excluded")]
 
     def bag(self, run: dict) -> BagData:
+        mem = self.__dict__.setdefault("_bags", {})
+        if run["id"] in mem:
+            return mem[run["id"]]
         c = self.cache / f"run{run['id']}.pkl"
         if c.exists():
-            return pickle.loads(c.read_bytes())
-        b = read_bag(self.root / run["bag"], self.cfg)
-        b.tf = dict(b.tf)
-        b.cloud_field_mean = dict(b.cloud_field_mean)
-        c.write_bytes(pickle.dumps(b))
+            b = pickle.loads(c.read_bytes())
+        else:
+            b = read_bag(self.root / run["bag"], self.cfg)
+            b.tf = dict(b.tf)
+            b.cloud_field_mean = dict(b.cloud_field_mean)
+            c.write_bytes(pickle.dumps(b))
+        b.mocap_lowpass_hz = self.truth_lowpass_hz
+        mem[run["id"]] = b
         return b
 
     def meta(self, run: dict) -> dict:
@@ -91,6 +100,35 @@ class Campaign:
             for r in runs
         ]
         return ErrorTable.concat([t for t in tabs if len(t)])
+
+    def reloc_segments(self, calib: Calibration) -> list:
+        """odom->map stretches of every run, linked into relocalization instances (cached)."""
+        key = round(calib.time_offset, 9)
+        if getattr(self, "_segs_key", None) == key:
+            return self._segs
+        segs = []
+        for r in self.manifest["runs"]:
+            if r["phase"] == "preflight" or r.get("excluded"):
+                continue
+            try:
+                s = self.bag(r).tf_series(self.frames["odin_odom"], self.frames["odin_map"], self.use_arrival)
+            except KeyError:
+                continue
+            t = s.t + (0.0 if self.use_arrival else calib.time_offset)
+            segs += reg.split_odom_map(r["id"], t, s.pose.p, s.pose.R)
+        self._segs, self._segs_key = reg.link_instances(segs), key
+        return self._segs
+
+    def instances(self, tab: ErrorTable, calib: Calibration) -> np.ndarray:
+        return reg.label(tab, self.reloc_segments(calib))
+
+    def debiased(self, tab: ErrorTable, calib: Calibration) -> ErrorTable:
+        """tab with each relocalization's mean map-frame offset removed (no-op when the
+        registration term is off)."""
+        if not self.use_registration or len(tab) == 0:
+            return tab
+        inst = self.instances(tab, calib)
+        return tab.with_err(reg.debias(tab, inst, reg.instance_biases(tab, inst, self.dt)))
 
     def map_updates(self, run: dict, calib: Calibration) -> np.ndarray:
         b = self.bag(run)
@@ -153,11 +191,14 @@ def step_calibration(c: Campaign, out: dict) -> Calibration:
     return Calibration(to.offset, he.X)
 
 
-def step_alignment(c: Campaign, calib: Calibration, tau_d: float, out: dict) -> Calibration:
+def step_alignment(c: Campaign, calib: Calibration, tau_d: float, out: dict | None,
+                   runs: list[dict] | None = None) -> Calibration:
     ident = Calibration(calib.time_offset, calib.X, Pose.identity())
-    tab = c.errors(c.runs_of("phase2"), ident, tau_d)  # true_M == T_WI when T_WM = I
+    tab = c.errors(c.runs_of("phase2") if runs is None else runs, ident, tau_d)  # true_M == T_WI when T_WM = I
     tab = tab.select(tab.map_age < 1.0)  # TRACK only
     al = align_map_to_mocap(tab.est_M, tab.true_M)
+    if out is None:
+        return Calibration(calib.time_offset, calib.X, al.T_WM)
     out.setdefault("phase1", {})["T_WM"] = {
         "vec": al.T_WM.to_vec(),
         "pos_rms_m": al.pos_rms,
@@ -178,13 +219,17 @@ def run_durations(tab: ErrorTable) -> list[float]:
 
 def fit_model(c: Campaign, calib: Calibration, p2_runs: list[dict], out: dict | None, label: str,
               field_axes=None) -> tuple:
-    """Latency -> static field -> FOGM on the given Phase 2 runs. Returns (model, corrected table, raw table, info)."""
+    """Latency -> static field -> FOGM on the given Phase 2 runs. Returns (model, corrected table, raw table, info).
+
+    Each relocalization's constant map-frame offset is removed first (registration.py): it is a
+    separate model term, and left in it would look like a static field that changes between
+    sessions and like extra slow FOGM variance."""
     raw = c.errors(p2_runs, calib, 0.0)
-    raw = raw.select(raw.map_age < 1.0)
+    raw = c.debiased(raw.select(raw.map_age < 1.0), calib)
     lat = regress_latency(raw)
     tau = lat.tau_d
     tab = c.errors(p2_runs, calib, tau)
-    tab = tab.select(tab.map_age < 1.0)
+    tab = c.debiased(tab.select(tab.map_age < 1.0), calib)
 
     a = c.cfg.get("analysis", {})
     r2, folds = cross_session_r2(tab, c.grid_res, c.min_bin)
@@ -293,6 +338,48 @@ def step_stationary(c: Campaign, calib: Calibration, model: Tier0Model, out: dic
         model.stationary = [AxisParams.from_fit(f) for f in pooled]
 
 
+def registration_fit(c: Campaign, calib: Calibration, model: Tier0Model, exclude_runs=(), min_samples: int = 30) -> dict:
+    """sigma_b from the mean error of every relocalization instance in the campaign (all phases:
+    sessions, holds, latency, INIT trials and outage runs each start from their own fix).
+    Instances that contain any of `exclude_runs` are left out (hold-out validation)."""
+    runs = [r for r in c.manifest["runs"]
+            if r["phase"] not in ("preflight", "calib", "mapping") and not r.get("excluded")]
+    tabs = []
+    for r in runs:
+        try:
+            t = c.errors([r], calib, model.tau_d)
+        except (KeyError, ValueError):
+            continue
+        t = t.select(t.map_age < 1.0)
+        if len(t):
+            tabs.append(t)
+    if not tabs:
+        return {"status": "no tracked runs", "n_instances": 0}
+    tab = ErrorTable.concat(tabs)
+    inst = c.instances(tab, calib)
+    bad = {int(k) for k in np.unique(inst[np.isin(tab.run, list(exclude_runs))])}
+    biases = [b for b in reg.instance_biases(tab, inst, c.dt, min_samples) if b.instance not in bad]
+    P = np.array([p.P for p in model.moving])
+    tau = np.array([-c.dt / np.log(min(max(p.a, 1e-6), 1 - 1e-9)) for p in model.moving])
+    fit = reg.fit_sigma(biases, P, tau)
+    for b in fit.get("instances", []) + fit.get("wrong_fixes", []):
+        b["run_names"] = [c.runs[r]["name"] for r in b["runs"]]
+    return fit
+
+
+def step_registration(c: Campaign, calib: Calibration, model: Tier0Model, out: dict):
+    if not c.use_registration:
+        out["registration"] = {"status": "disabled (analysis.registration_term: false)"}
+        return
+    fit = registration_fit(c, calib, model)
+    out["registration"] = fit
+    if "sigma" in fit:
+        model.registration_sigma = np.array([fit["sigma"][a] for a in reg.MAP_AXES])
+        model.registration = fit
+        model.events["p_wrong_fix"] = fit["p_wrong_fix"]
+        model.events["wrong_fix_offsets"] = [w["mean"] for w in fit["wrong_fixes"]]
+
+
 def step_latency_check(c: Campaign, calib: Calibration, tau_d: float, out: dict):
     runs = c.runs_of("phase4")
     if not runs:
@@ -332,6 +419,37 @@ def refine_cover_times(b: BagData, t_cover: float, t_uncover: float, calib: Cali
     return float(t[low].min()), float(t[low].max() + period)
 
 
+def natural_losses(c: Campaign, tab: ErrorTable, calib: Calibration) -> list:
+    """LOST events in tracked data, minus deliberate driver restarts (INIT trials and session
+    starts relaunch Odin inside a recorded run; odom->map stops then too, but nothing was lost)."""
+    restarts = [(tr["t_launch"] - 15.0, (tr.get("t_log_success") or tr["t_launch"] + tr["timeout"]) + 2.0)
+                for tr in c.manifest.get("init_trials", [])]
+    ups = {int(r): c.map_updates(c.runs[int(r)], calib) for r in np.unique(tab.run)}
+    return [e for e in ev.detect_lost(tab, ups) if not any(a <= e.t <= b for a, b in restarts)]
+
+
+def outage_reregistration(c: Campaign, calib: Calibration, run: dict, tab: ErrorTable, t_cover: float,
+                          t_uncover: float) -> dict:
+    """What a covered window does to the pose output: how long odom->imu stops, and how far the
+    map-frame offset moved between before the cover and after output resumes (Odin keeps its
+    odom->map, so dead-reckoning drift during the outage stays in the estimate)."""
+    b = c.bag(run)
+    oi = b.tf_series(c.frames["odin_odom"], c.frames["odin_imu"], c.use_arrival).t
+    oi = oi + (0.0 if c.use_arrival else calib.time_offset)
+    win = oi[(oi > t_cover - 1.0) & (oi < t_uncover + 15.0)]
+    gaps = np.diff(win)
+    gap = float(gaps.max()) if len(gaps) else np.nan
+    resume = float(win[1:][np.argmax(gaps)]) if len(gaps) else t_uncover
+    eM = reg.track_to_map(tab.err, tab.heading)
+    pre = (tab.t > t_cover - 4.0) & (tab.t < t_cover - 0.3)
+    post = (tab.t > max(resume, t_uncover) + 1.0) & (tab.t < max(resume, t_uncover) + 5.0)
+    if pre.sum() < 5 or post.sum() < 5:
+        return {"run": run["name"], "output_gap_s": gap, "jump_pos_m": np.nan, "jump_rot_deg": np.nan}
+    d = eM[post].mean(0) - eM[pre].mean(0)
+    return {"run": run["name"], "output_gap_s": gap, "jump_pos_m": float(np.linalg.norm(d[:3])),
+            "jump_rot_deg": float(np.degrees(np.linalg.norm(d[3:]))), "jump_map": dict(zip(reg.MAP_AXES, d))}
+
+
 def step_events(c: Campaign, calib: Calibration, model: Tier0Model, out: dict, tracked: list[ErrorTable]):
     res: dict = {}
     trials = []
@@ -340,8 +458,10 @@ def step_events(c: Campaign, calib: Calibration, model: Tier0Model, out: dict, t
         b = c.bag(run)
         fix_t = None
         try:
+            # the bag can start before the driver restart: odom->map from the previous driver is not this fix
             s = b.tf_series(c.frames["odin_odom"], c.frames["odin_map"], use_arrival=True)
-            fix_t = float(s.t[0])
+            after = s.t[s.t > tr["t_launch"]]
+            fix_t = float(after[0]) if len(after) else None
         except KeyError:
             pass
         if tr.get("t_log_success") is not None:
@@ -374,8 +494,7 @@ def step_events(c: Campaign, calib: Calibration, model: Tier0Model, out: dict, t
     n_lost, T = 0, 0.0
     lost_list = []
     for tab in tracked:
-        ups = {int(r): c.map_updates(c.runs[int(r)], calib) for r in np.unique(tab.run)}
-        found = ev.detect_lost(tab, ups)
+        found = natural_losses(c, tab, calib)
         lost_list += [asdict(e) for e in found]
         n_lost += len(found)
         T += sum(run_durations(tab))
@@ -386,17 +505,28 @@ def step_events(c: Campaign, calib: Calibration, model: Tier0Model, out: dict, t
     if "lambda_lost_upper95" in lr:
         model.events["lambda_lost_upper95"] = lr["lambda_lost_upper95"]
 
-    outs = []
+    outs, rereg = [], []
     for o in c.manifest.get("outages", []):
         run = c.runs[o["run"]]
         tab = c.errors([run], calib, model.tau_d)
         if len(tab):
             t0, t1 = refine_cover_times(c.bag(run), o["t_cover"], o["t_uncover"], calib)
             outs.append(ev.analyze_outage(tab, t0, t1, c.map_updates(run, calib)))
+            rereg.append(outage_reregistration(c, calib, run, tab, t0, t1) | {"cover_s": o["cover_s"]})
     if outs:
         rr = ev.recovery_rate(outs)
         res["lost_induced"] = rr
         model.events["lambda_rec"] = rr["lambda_rec"]
+    if rereg:
+        res["outage_reregistration"] = rereg
+        by = {}
+        for r in rereg:
+            by.setdefault(r["cover_s"], []).append(r)
+        model.events["outage_effect_by_cover_s"] = {
+            str(k): {"pose_output_gap_s": float(np.nanmean([r["output_gap_s"] for r in v])),
+                     "offset_jump_m": float(np.nanmean([r["jump_pos_m"] for r in v])),
+                     "offset_jump_deg": float(np.nanmean([r["jump_rot_deg"] for r in v]))}
+            for k, v in sorted(by.items())}
     out["phase5"] = res or {"status": "no event data"}
 
 
@@ -410,24 +540,40 @@ def step_validation(c: Campaign, calib: Calibration, out: dict, full: Tier0Model
     train = [r for r in p2 if r["session"] != held]
     test = [r for r in p2 if r["session"] == held]
     axes = full.static_field.enabled if full.static_field is not None else np.zeros(6, bool)
-    model, *_ = fit_model(c, calib, train, None, "", field_axes=axes)
+    # nothing fitted on the held-out session: T_WM is re-aligned on the training runs only (the
+    # full-campaign T_WM averages the held-out registration in), and sigma_b leaves out every
+    # relocalization the held-out runs belong to
+    calib = step_alignment(c, calib, full.tau_d, None, runs=train)
+    model, tab_train, *_ = fit_model(c, calib, train, None, "", field_axes=axes)
     model.stationary = full.stationary
+    reg_scale = 1.0
+    reg_note = "no registration term"
+    if full.registration_sigma is not None:
+        rf = registration_fit(c, calib, model, exclude_runs={r["id"] for r in test})
+        if "sigma" in rf:
+            model.registration_sigma = np.array([rf["sigma"][a] for a in reg.MAP_AXES])
+            model.registration = rf
+            # the held-out offset is measured against a T_WM that itself averages k training
+            # registrations: var(b_test - mean(b_train)) = sigma^2 (1 + 1/k)
+            it = c.instances(tab_train, calib)
+            k = len([i for i in np.unique(it[it >= 0]) if (it == i).sum() >= 30])
+            reg_scale = 1.0 + 1.0 / max(k, 1)
+            reg_note = f"sigma_b from {rf['n_instances']} relocalizations outside the held-out session; T_WM from {k} -> variance x{reg_scale:.2f}"
     raw = c.errors(test, calib, 0.0)
     raw = raw.select(raw.map_age < 1.0)
-    ups = {int(r): c.map_updates(c.runs[int(r)], calib) for r in np.unique(raw.run)}
-    n_real = len(ev.detect_lost(raw, ups))
-    tr_lost = []
+    n_real = len(natural_losses(c, raw, calib))
     trt = c.errors(train, calib, model.tau_d)
     trt = trt.select(trt.map_age < 1.0)
-    ups_t = {int(r): c.map_updates(c.runs[int(r)], calib) for r in np.unique(trt.run)}
-    n_train = len(ev.detect_lost(trt, ups_t))
+    n_train = len(natural_losses(c, trt, calib))
     Ttrain = sum(run_durations(trt))
     model.lambda_lost = n_train / Ttrain if Ttrain else 0.0
-    vr = validate(model, raw, n_mc=c.cfg.get("analysis", {}).get("mc_realizations", 50), real_lost_events=n_real)
+    vr = validate(model, raw, n_mc=c.cfg.get("analysis", {}).get("mc_realizations", 50), real_lost_events=n_real,
+                  instance=c.instances(raw, calib), registration_scale=reg_scale)
     curves = vr.metrics.pop("_curves")
     out["_figs"]["validation"] = curves
     out["phase6"] = {
         "held_out_session": held,
+        "registration": reg_note,
         "pass": vr.passed,
         "failing_metrics": vr.failing,
         "tier1_suggestions": {m: TIER1_HINTS[m] for m in vr.failing},
@@ -448,11 +594,13 @@ def analyze(root: Path, cfg: dict) -> dict:
         raise SystemExit("no Phase 2 runs: cannot fit T_WM / Tier 0")
     # T_WM once with tau=0, estimate latency, then refit T_WM once with the latency and freeze it
     calib = step_alignment(c, calib, 0.0, out)
-    tau0 = regress_latency(c.errors(c.runs_of("phase2"), calib, 0.0)).tau_d
+    raw0 = c.errors(c.runs_of("phase2"), calib, 0.0)
+    tau0 = regress_latency(c.debiased(raw0.select(raw0.map_age < 1.0), calib)).tau_d
     calib = step_alignment(c, calib, tau0, out)
 
     model, tab, raw, info, eta, fits = fit_model(c, calib, c.runs_of("phase2"), out, "phase2")
     step_stationary(c, calib, model, out)
+    step_registration(c, calib, model, out)
     step_latency_check(c, calib, model.tau_d, out)
     tracked = [tab]
     if c.runs_of("phase3"):

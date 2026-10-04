@@ -108,6 +108,16 @@ def body_aligned(delta_p: np.ndarray, delta_theta: np.ndarray, heading: np.ndarr
     return np.concatenate([(Rt @ delta_p[..., None])[..., 0], (Rt @ delta_theta[..., None])[..., 0]], axis=-1)
 
 
+def track_to_map(err: np.ndarray, heading: np.ndarray) -> np.ndarray:
+    """Body-aligned (track-frame) 6-vector errors -> map-frame (x, y, z, rx, ry, rz)."""
+    R = rot_z(heading)
+    return np.concatenate([(R @ err[:, :3, None])[..., 0], (R @ err[:, 3:, None])[..., 0]], axis=-1)
+
+
+def map_to_track(err_M: np.ndarray, heading: np.ndarray) -> np.ndarray:
+    return body_aligned(err_M[:, :3], err_M[:, 3:], heading)
+
+
 def pose_error(est: Pose, true: Pose, heading: np.ndarray) -> np.ndarray:
     """Body-aligned error of est relative to true.
 
