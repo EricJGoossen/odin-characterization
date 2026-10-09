@@ -52,7 +52,7 @@ def test_human_day1_and_day2(tmp_path, small_cfg):
     cmd = FakeCmd()
     driver = FakeDriver(small_cfg, root)
     world = World(cmd, driver)
-    installed = Path(small_cfg["driver"]["base_config"])
+    installed = Path(small_cfg["sensor"]["driver"]["base_config"])
     original = installed.read_text()
     c = SimulatedHuman(small_cfg, root, prompts=True, skip_warmup=True, io=(world, cmd, driver, FakeRec()))
     try:

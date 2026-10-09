@@ -13,6 +13,7 @@ import numpy as np
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
+from odin_char.sensors import resolve_config  # noqa: E402
 from odin_char.robot.motion import (  # noqa: E402
     calib_motion,
     figure8,
@@ -27,12 +28,12 @@ from odin_char.robot.motion import (  # noqa: E402
 # ---- assumptions (hardware-dependent, not measurable here)
 DRIVER_START_S = 10.0  # launch -> first IMU message
 RELOC_S = 10.0  # driver start -> relocalization fix (timeout is phases.phase5.timeout_s)
-MAP_SAVE_S = 60.0  # /odin1/save_map transfer
+MAP_SAVE_S = 60.0  # map save (Odin: /odin1/save_map transfer)
 BAG_OVERHEAD_S = 4.0  # ros2 bag start/stop per run
 DRIVER_STOP_S = 3.0
 PROMPT_S = 30.0  # a person doing something when prompted
 
-cfg = yaml.safe_load(Path(sys.argv[1] if len(sys.argv) > 1 else "config/campaign.yaml").read_text())
+cfg = resolve_config(yaml.safe_load(Path(sys.argv[1] if len(sys.argv) > 1 else "config/campaign.yaml").read_text()))
 rb, room, ph = cfg["robot"], cfg["room"], cfg["phases"]
 home = np.array(room["home"], float)
 a = rb["max_accel"]
@@ -43,7 +44,7 @@ def go(p, q):
 
 
 rows = []
-warm = cfg["driver"]["warmup_min"] * 60
+warm = cfg["sensor"]["warmup_min"] * 60
 rows.append(("check (gain identification)", 6 * 1.0 + 6 * 0.7 + PROMPT_S, "1 prompt"))
 rows.append(("preflight", warm + 3 * ph["preflight"]["duration_s"] + 4 * PROMPT_S + 3 * BAG_OVERHEAD_S
              + DRIVER_START_S + DRIVER_STOP_S, "4 prompts"))

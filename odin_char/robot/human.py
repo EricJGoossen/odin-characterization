@@ -1,6 +1,6 @@
 """Human-driven campaign: a person drives the sentry with the remote; the script does the rest.
 
-The script starts/stops the Odin driver, records every run, tells the driver what to do and shows
+The script starts/stops the sensor's driver, records every run, tells the driver what to do and shows
 live mocap feedback (speed, distance, laps, map coverage, distance/heading to a target). It never
 sends velocity commands, so neither otto's odin-characterization mode nor the MCB branch is needed.
 
@@ -20,7 +20,8 @@ import numpy as np
 
 from .campaign import Abort, Campaign, beep
 from .motion import figure8_path, wrap
-from .processes import BagRecorder, OdinDriver
+from ..sensors import Mode, load_sensor
+from .processes import BagRecorder
 
 
 class NullCommand:
@@ -44,7 +45,7 @@ class HumanCampaign(Campaign):
         if io is None:
             from .ros_io import RosIO
 
-            io = (RosIO(cfg), NullCommand(), OdinDriver(cfg), BagRecorder(cfg))
+            io = (RosIO(cfg), NullCommand(), load_sensor(cfg).make_driver(), BagRecorder(cfg))
         super().__init__(cfg, root, prompts, skip_warmup, io)
         self._stdin_ready = self._stdin_ready_default
         self._readline = sys.stdin.readline
@@ -254,7 +255,7 @@ class HumanCampaign(Campaign):
         print(f"mocap OK: robot at x {pose[0]:.2f}, y {pose[1]:.2f}, yaw {np.degrees(pose[2]):.0f} deg "
               f"({'inside' if self.fence.inside(pose) else 'OUTSIDE'} the fence)")
         if self.driver.already_running() and not self.driver.alive():
-            raise Abort("a separate odin driver is running; stop it (the campaign starts its own)")
+            raise Abort(f"a separate {self.sensor.name} driver is running; stop it (the campaign starts its own)")
         print("human mode: the robot is never commanded; drive it with the remote when asked.")
 
     def step_jog(self, *a, **k):
@@ -262,7 +263,7 @@ class HumanCampaign(Campaign):
 
     def step_calib(self):
         ph = self.cfg["phases"]["calib"]
-        self.warmup(0)
+        self.warmup(Mode.ODOMETRY)
         r = self.new_run("calib", "calib")
         self.record(r, lambda: self.monitor(
             "Calibration: drive around with LOTS of rotation for the next "
@@ -293,9 +294,9 @@ class HumanCampaign(Campaign):
                 path.append([float(p[0]), float(p[1]), float(p[2])])
 
         run_dir = self.root / "logs"
-        self.warmup(1)
-        self.ask("Mapping: park at a central spot, facing into the room. Odin will start a fresh SLAM map.")
-        self.start_driver(1, run_dir, "mapping")
+        self.warmup(Mode.MAPPING)
+        self.ask(f"Mapping: park at a central spot, facing into the room. {self.sensor.name} will start a fresh SLAM map.")
+        self.start_driver(Mode.MAPPING, run_dir, "mapping")
         time.sleep(3.0)
         start_pose = self.ros.mocap()[0]
         r = self.new_run("mapping", "mapping")
@@ -342,16 +343,16 @@ class HumanCampaign(Campaign):
         sid = f"s{len(sessions) + 1}"
         print(f"=== Phase 2 session {sid} ===")
         self.ask(f"Operator: stand at the fixed spot ({p2['operator_spot']}) except for the person driving; "
-                 "keep everyone else still and out of Odin's view.")
-        self.warmup(2)
+                 f"keep everyone else still and out of {self.sensor.name}'s view.")
+        self.warmup(Mode.RELOCALIZE)
         self.ask("Drive to the start of the figure-8 (tape) and stop.")
         run_dir = self.root / "logs"
         r = self.new_run(f"{sid}_1x", "phase2", session=sid, speed_class="1x")
-        r["driver_config"] = str(run_dir / f"control_command_{sid}.yaml")
         measured = {}
 
         def first():
             t_launch, fix = self.fresh_relocalized_start(run_dir, sid)
+            r["driver_config"] = str(self.driver.config_path or "")
             self.manifest["init_trials"].append({"run": r["id"], "offset_m": 0.0, "heading_deg": 0.0, "moving": False,
                                                  "t_launch": t_launch, "t_log_success": self.driver.events.get("relocalized"),
                                                  "timeout": self.cfg["phases"]["phase5"]["timeout_s"], "source": "session_start"})
@@ -378,8 +379,8 @@ class HumanCampaign(Campaign):
         sessions = sorted({r["session"] for r in self.manifest["runs"] if r["phase"] == "phase2"})
         sid = f"s{len(sessions) + 1}"
         print(f"=== validation run ({sid}, held out from fitting): {laps} laps ===")
-        self.ask("Everyone except the driver back at the fixed spot, out of Odin's view.")
-        self.warmup(2)
+        self.ask(f"Everyone except the driver back at the fixed spot, out of {self.sensor.name}'s view.")
+        self.warmup(Mode.RELOCALIZE)
         self.ask("Drive to the start of the figure-8 (tape) and stop.")
         run_dir = self.root / "logs"
         r = self.new_run(f"{sid}_validation", "phase2", session=sid, speed_class="1x", validation=True)
@@ -400,11 +401,11 @@ class HumanCampaign(Campaign):
         self.mark("validation")
 
     def ensure_tracking(self):
-        if self.driver.alive() and self.driver.mode == 2 and self.ros.first_map_tf_arrival is not None:
+        if self.driver.alive() and self.driver.mode == Mode.RELOCALIZE and self.ros.first_map_tf_arrival is not None:
             return
-        self.warmup(2)
-        if self.ros.first_map_tf_arrival is None or self.driver.mode != 2:
-            self.ask("Odin will relocalize: park somewhere you drove during mapping.")
+        self.warmup(Mode.RELOCALIZE)
+        if self.ros.first_map_tf_arrival is None or self.driver.mode != Mode.RELOCALIZE:
+            self.ask(f"{self.sensor.name} will relocalize: park somewhere you drove during mapping.")
             _, fix = self.fresh_relocalized_start(self.root / "logs", f"reloc_{int(time.time())}")
             if fix is None:
                 raise Abort("could not relocalize")
@@ -471,7 +472,7 @@ class HumanCampaign(Campaign):
         if "mapping_trajectory" not in self.state:
             raise Abort("run the 'map' step first (INIT offsets are relative to the mapping path)")
         ph = self.cfg["phases"]["phase5"]
-        self.warmup(2)
+        self.warmup(Mode.RELOCALIZE)
         run_dir = self.root / "logs"
         trials = self.init_start_poses()
         done = {t.get("key") for t in self.manifest["init_trials"]}
@@ -486,7 +487,7 @@ class HumanCampaign(Campaign):
             r = self.new_run(key, "init")
 
             def body(tr=tr, key=key, r=r, actual_off=actual_off, actual_hd=actual_hd):
-                self.start_driver(2, run_dir, key)
+                self.start_driver(Mode.RELOCALIZE, run_dir, key)
                 t_launch = self.driver.started_at
                 if tr["moving"]:
                     self.standard_motion()
@@ -514,7 +515,7 @@ class HumanCampaign(Campaign):
             if "relocalized" in self.driver.events:
                 return self.driver.events["relocalized"]
             if not self.driver.alive():
-                raise Abort("odin driver exited")
+                raise Abort(f"{self.sensor.name} driver exited")
             time.sleep(0.05)
         return None
 
@@ -523,7 +524,7 @@ class HumanCampaign(Campaign):
         auto = ph.get("shutter_cmd_cover") and ph.get("shutter_cmd_uncover")
         self.ensure_tracking()
         done = {o.get("key") for o in self.manifest["outages"]}
-        self.ask("Outage trials: one person drives slowly back and forth; a second person covers Odin's window "
+        self.ask(f"Outage trials: one person drives slowly back and forth; a second person covers {self.sensor.name}'s window "
                  "on 'COVER NOW' and uncovers it on 'UNCOVER NOW'." if not auto else
                  "Outage trials: drive slowly back and forth when asked; the shutter is automatic.")
         for dur in ph["cover_durations_s"]:

@@ -108,11 +108,11 @@ def _figures(d: Path, figs: dict, eta: np.ndarray, tab) -> list[str]:
 
 def write_report(res_dir: Path, out: dict, model, figs: dict, eta, tab):
     made = _figures(res_dir / "figures", figs, eta, tab)
-    L = ["# Odin1 Tier 0 characterization report", ""]
+    L = [f"# {out.get('sensor', {}).get('name', 'Sensor')} Tier 0 characterization report", ""]
 
     p0 = out.get("phase0", {})
     L += ["## Phase 0: IR interference preflight", f"- {_box(p0.get('pass'))} no significant difference in either direction"]
-    for side in ("odin_side", "mocap_side"):
+    for side in ("sensor_side", "mocap_side"):
         for r in p0.get(side, []):
             if "p" in r:
                 L.append(f"  - {side}: {r['metric']}: on {_f(r['on_mean'])} vs off {_f(r['off_mean'])} (p={_f(r['p'])}, rel {_f(r['rel_diff'])})"

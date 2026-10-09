@@ -1,4 +1,5 @@
-"""Phase 0 preflight: does mocap's IR disturb Odin, or Odin's 940 nm laser disturb mocap?"""
+"""Phase 0 preflight: does mocap's IR disturb the sensor, or the sensor's own emitter (Odin's 940 nm
+laser) disturb mocap?"""
 from __future__ import annotations
 
 import numpy as np
@@ -19,8 +20,8 @@ def _compare(a, b, name: str, alpha: float = 0.01, min_rel: float = 0.05) -> dic
             "significant": bool(significant)}
 
 
-def odin_side(mocap_on: BagData, mocap_off: BagData) -> list[dict]:
-    """Odin cloud statistics with mocap strobes on vs off."""
+def sensor_side(mocap_on: BagData, mocap_off: BagData) -> list[dict]:
+    """Sensor cloud statistics with mocap strobes on vs off."""
     out = [
         _compare(mocap_on.cloud_valid, mocap_off.cloud_valid, "cloud_raw valid points per cloud"),
         _compare(mocap_on.cloud_range_mean, mocap_off.cloud_range_mean, "mean range of valid points (m)"),
@@ -52,14 +53,14 @@ def _pixel_noise(on: BagData, off: BagData, min_rel: float = 0.10) -> dict:
             "rel_diff": rel, "p": p, "pixels": int(both.sum()), "significant": bool(p < 0.01 and rel > min_rel)}
 
 
-def mocap_side(odin_on: BagData, odin_off: BagData, expected_markers: int | None) -> list[dict]:
-    """Mocap marker counts (ghosts) and body-pose jitter with Odin's laser on vs off."""
+def mocap_side(sensor_on: BagData, sensor_off: BagData, expected_markers: int | None) -> list[dict]:
+    """Mocap marker counts (ghosts) and body-pose jitter with the sensor on vs off."""
     out = []
-    if odin_on.marker_n and odin_off.marker_n:
-        out.append(_compare(odin_on.marker_n, odin_off.marker_n, "visible marker count"))
+    if sensor_on.marker_n and sensor_off.marker_n:
+        out.append(_compare(sensor_on.marker_n, sensor_off.marker_n, "visible marker count"))
         if expected_markers:
-            g_on = np.maximum(np.array(odin_on.marker_n) - expected_markers, 0)
-            g_off = np.maximum(np.array(odin_off.marker_n) - expected_markers, 0)
+            g_on = np.maximum(np.array(sensor_on.marker_n) - expected_markers, 0)
+            g_off = np.maximum(np.array(sensor_off.marker_n) - expected_markers, 0)
             out.append(_compare(g_on, g_off, "ghost markers per frame"))
     else:
         out.append({"metric": "marker residuals / ghost markers", "status": "not in bag: check in the mocap software"})
@@ -69,7 +70,7 @@ def mocap_side(odin_on: BagData, odin_off: BagData, expected_markers: int | None
         return np.linalg.norm(s.pose.p - np.median(s.pose.p, axis=0), axis=1)
 
     try:
-        out.append(_compare(jitter(odin_on), jitter(odin_off), "static rigid-body position jitter (m)"))
+        out.append(_compare(jitter(sensor_on), jitter(sensor_off), "static rigid-body position jitter (m)"))
     except KeyError:
         pass
     return out

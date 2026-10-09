@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# One-time setup on the robot computer (the one Odin is plugged into) and/or the analysis machine.
-# Creates .venv next to this repo. On the robot computer, ROS 2 and the odin_ros_driver workspace
-# (ODIN_WS, default ~/odin_ws) are sourced automatically so rclpy is visible inside the venv.
+# One-time setup on the robot computer (the one the sensor is plugged into) and/or the analysis machine.
+# Creates .venv next to this repo. On the robot computer, ROS 2 and the sensor driver's workspace
+# (odin_char/sensors/<type>/env.sh) are sourced automatically so rclpy is visible inside the venv.
 set -eo pipefail
 cd "$(dirname "$0")/.."
 
 command -v ros2 >/dev/null 2>&1 || { [ -f /opt/ros/${ROS_DISTRO:-humble}/setup.bash ] && source /opt/ros/${ROS_DISTRO:-humble}/setup.bash; }
 if command -v ros2 >/dev/null 2>&1; then
-    ros2 pkg prefix odin_ros_driver >/dev/null 2>&1 || { [ -f "${ODIN_WS:-$HOME/odin_ws}/install/setup.bash" ] && source "${ODIN_WS:-$HOME/odin_ws}/install/setup.bash"; }
+    source scripts/sensor_env.sh
     echo "ROS 2 found ($ROS_DISTRO)"
     python3 -m venv --system-site-packages .venv   # keeps rclpy / tf2_msgs from the ROS install
-    if ! ros2 pkg prefix odin_ros_driver >/dev/null 2>&1; then
-        echo "WARNING: odin_ros_driver not found (set ODIN_WS); needed for the campaign."
-    fi
+    sensor_env_check || echo "WARNING: the $SENSOR_TYPE driver is needed for the campaign."
+
 else
     echo "ROS 2 not found: setting up for analysis only."
     python3 -m venv .venv

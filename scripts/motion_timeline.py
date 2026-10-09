@@ -13,7 +13,7 @@ from odin_char.bagio import read_bag  # noqa: E402
 from odin_char.robot.campaign import load_config  # noqa: E402
 
 cfg = load_config(ROOT / "config" / "campaign.yaml")
-cfg["topics"]["cloud"] = None
+cfg["sensor"]["topics"]["cloud"] = None
 b = read_bag(Path(sys.argv[1]), cfg)
 s = b.mocap_series()
 t = s.t - s.t[0]

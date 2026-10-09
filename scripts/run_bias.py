@@ -1,6 +1,6 @@
 """Per-run / per-relocalization mean error after a pipeline run (uses results/calibration.json).
 
-Splits every run at Odin driver restarts (gaps in odom->imu) so each block is one relocalization,
+Splits every run at driver restarts (gaps in the sensor's odometry) so each block is one relocalization,
 then prints the map-frame position error and attitude error mean/std per block.
 
     .venv/bin/python scripts/run_bias.py campaigns/odin1
@@ -43,7 +43,7 @@ for r in c.manifest["runs"]:
         print(f"{r['name']:24s} too few tracked samples ({len(tab)})")
         continue
     b = c.bag(r)
-    oi = b.tf_series(c.frames["odin_odom"], c.frames["odin_imu"]).t + calib.time_offset
+    oi = c.sensor.odometry(b).t + calib.time_offset
     restarts = oi[1:][np.diff(oi) > 2.0]
     blk = np.searchsorted(restarts, tab.t)
     ew = tab.world_position_error()

@@ -91,8 +91,8 @@ class BagData:
         constant (minimum delay) is absorbed by the Phase 1 IMU/mocap time offset.
 
         lowpass: apply the zero-phase truth filter (mocap_lowpass_hz). The marker body vibrates
-        at ~8 Hz with the motors energised (odin1: 5-7 mrad rms) while Odin's 10 Hz output can
-        represent nothing above 5 Hz; unfiltered, that vibration is scored as Odin error."""
+        at ~8 Hz with the motors energised (odin1: 5-7 mrad rms) while a 10 Hz sensor output can
+        represent nothing above 5 Hz; unfiltered, that vibration is scored as sensor error."""
         key = (lowpass and bool(self.mocap_lowpass_hz), self.mocap_lowpass_hz, self.mocap_clean, self.mocap_clock)
         memo = self.__dict__.setdefault("_mocap_memo", {})
         if key in memo:
@@ -281,13 +281,15 @@ def _cloud_stats(msg, roi, data: BagData):
 
 
 def read_bag(path: str | Path, cfg: dict) -> BagData:
-    """Read one bag. `cfg` is campaign.yaml (uses its `topics`, `mocap` and `preflight` parts)."""
+    """Read one bag. `cfg` is campaign.yaml (uses its `topics`, `sensor`, `mocap` and `preflight` parts)."""
     from rosbags.highlevel import AnyReader
     from rosbags.typesys import Stores, get_typestore
 
     from .mocap_config import MocapConfig
+    from .sensors import load_sensor
 
     topics = cfg["topics"]
+    sensor_topics = load_sensor(cfg).topics  # the sensor's imu / odometry / cloud (each optional)
     mocap = MocapConfig.from_cfg(cfg)
     wanted_tf = {topics.get("tf", "/tf"), topics.get("tf_static", "/tf_static")}
     roi = cfg.get("preflight", {}).get("wall_roi")
@@ -299,8 +301,8 @@ def read_bag(path: str | Path, cfg: dict) -> BagData:
         data.topics = {c.topic: c.msgtype for c in reader.connections}
         data.t_start = reader.start_time * 1e-9
         data.t_end = reader.end_time * 1e-9
-        names = wanted_tf | {mocap.topic, topics["odometry"], topics["imu"], topics.get("cloud") or "",
-                             topics.get("markers") or "", topics.get("rosout", "/rosout")}
+        names = wanted_tf | {mocap.topic, topics.get("markers") or "", topics.get("rosout", "/rosout")}
+        names |= {sensor_topics.get(k) or "" for k in ("odometry", "imu", "cloud")}
         want = [c for c in reader.connections if c.topic in names]
         for conn, t_ns, raw in reader.messages(connections=want):
             t_recv = t_ns * 1e-9
@@ -321,15 +323,15 @@ def read_bag(path: str | Path, cfg: dict) -> BagData:
                     s.q.append(_xyzw(tr.transform.rotation))
             elif conn.topic == mocap.topic:
                 continue
-            elif conn.topic == topics["odometry"]:
+            elif conn.topic == sensor_topics.get("odometry"):
                 data.odom.t_stamp.append(_stamp(msg.header))
                 data.odom.t_recv.append(t_recv)
                 data.odom.p.append(_xyz(msg.pose.pose.position))
                 data.odom.q.append(_xyzw(msg.pose.pose.orientation))
-            elif conn.topic == topics["imu"]:
+            elif conn.topic == sensor_topics.get("imu"):
                 data.imu_t.append(_stamp(msg.header))
                 data.imu_gyro.append(_xyz(msg.angular_velocity))
-            elif conn.topic == topics.get("cloud"):
+            elif conn.topic == sensor_topics.get("cloud"):
                 data.cloud_t.append(_stamp(msg.header))
                 _cloud_stats(msg, roi, data)
             elif conn.topic == topics.get("markers"):

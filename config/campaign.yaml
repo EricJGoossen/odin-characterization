@@ -1,4 +1,4 @@
-# Odin1 Tier 0 characterization campaign configuration.
+# Tier 0 characterization campaign configuration (sensor: see `sensor:` below).
 # Everything marked VERIFY must be checked on the real robot before the first run.
 #   scripts/run_campaign.sh find-mocap   lists live mocap candidates (topics, tf pairs, rates)
 #   python -m odin_char.cli inspect <bag> lists the topics and tf pairs in a recorded bag
@@ -9,8 +9,8 @@
 #   pose      geometry_msgs/PoseStamped on `topic`
 #   transform geometry_msgs/TransformStamped on `topic`
 #   odometry  nav_msgs/Odometry on `topic`
-# The tracked body is the robot's mocap rigid body. Odin rides on turret major, which the MCB holds
-# at a fixed chassis yaw during the campaign; a rigid body on Odin's bracket is better still.
+# The tracked body is the robot's mocap rigid body. The sensor (Odin) rides on turret major, which the
+# MCB holds at a fixed chassis yaw during the campaign; a rigid body on the sensor's bracket is better still.
 mocap:
   # vrpn_mocap_client_node on the lab network: PoseStamped in frame "world", ~360 Hz, best effort
   # (checked 2026-10-02 with find-mocap; arrival - stamp ~2 ms)
@@ -24,36 +24,32 @@ mocap:
   clock: server
   qos: best_effort            # best_effort | reliable (best_effort also hears reliable publishers)
 
-frames:
-  # Odin frames, from odin_ros_driver (include/host_sdk_sample.h, v0.14.4):
-  #   odom -> imu  (send_odom_baselink_tf), odom -> map (relocalization mode only), imu -> lidar
-  odin_odom: odom
-  odin_imu: imu
-  odin_map: map
-  # Odin publishes odom->map with parent=odom, child=map (inverse of ROS map->odom).
-  # Only set this true if a driver update switches to the ROS convention (parent=map).
-  odom_map_is_ros_convention: false
+# --------------------------------------------------------------------------- sensor under test
+# One folder per sensor type in odin_char/sensors/<type>/; its defaults.yaml holds the frames, topics
+# and driver settings. Anything set here overrides those defaults (see odin_char/sensors/README.md).
+sensor:
+  type: odin
+  driver:
+    # The installed control_command.yaml. Each run's config is written into it and the original is
+    # restored when the campaign exits (details in odin_char/sensors/odin/defaults.yaml).
+    base_config: ~/odin_ws/src/odin_ros_driver/config/control_command.yaml   # VERIFY path
+  # Thermal warm-up before collecting (protocol: 20 min). Disabled for speed: thermal effects
+  # (Tier 2) are ignored. Set back to 20 to follow the protocol.
+  warmup_min: 0
 
-topics:                       # Odin driver topics (odin_ros_driver v0.14.4)
+topics:                       # recorded with every run, whatever the sensor
   tf: /tf
   tf_static: /tf_static
-  odometry: /odin1/odometry
-  odometry_highfreq: /odin1/odometry_highfreq
-  imu: /odin1/imu
-  cloud: /odin1/cloud_raw
   rosout: /rosout
   markers: null               # optional mocap marker array topic (Phase 0 ghost-marker check)
 # --------------------------------------------------------------------------- recording
-# Measured on the sentry Jetson: /odin1/cloud_raw 7.5 MB/s (27 GB/h), imu 0.13 MB/s,
-# odometry_highfreq 0.29 MB/s. The cloud is recorded only for the Phase 0 preflight (needed there).
 recording:
   min_free_gb: 2.0            # a recording refuses to start below this
-  odometry_highfreq: false    # the analysis uses the odom->imu tf; saves ~1 GB/h
-  cloud_in_outages: true      # refine cover/uncover times from the cloud (~0.45 GB per minute, ~5 GB total)
+  cloud_in_outages: true      # refine cover/uncover times from the cloud (Odin: ~0.45 GB per minute, ~5 GB total)
 
 # --------------------------------------------------------------------------- robot / room
 robot:
-  # human: a person drives with the remote; the script guides, records and runs Odin (no commands
+  # human: a person drives with the remote; the script guides, records and runs the sensor (no commands
   #        are sent, no otto mode or MCB branch needed). autonomous: the script drives over
   #        otto's odin-characterization mode (needs a working Jetson <-> MCB link). The settings
   #        below this line are only used in autonomous mode.
@@ -78,43 +74,6 @@ room:
   fence_max: [4.0, 3.0]       # VERIFY
   margin: 0.4
   home: [0.0, 0.0, 0.0]       # x, y, yaw where the robot parks between phases
-
-# --------------------------------------------------------------------------- Odin driver
-driver:
-  # The installed control_command.yaml. odin_ros_driver ignores any config path you pass it and
-  # always reads this file, so each run's config (original + overrides + map mode) is written into
-  # it. The original is backed up as control_command.yaml.odin_char_original and restored when the
-  # campaign exits; every run's config is also archived in <campaign>/logs/.
-  base_config: ~/odin_ws/src/odin_ros_driver/config/control_command.yaml   # VERIFY path
-  # Run the driver node directly (the launch file also starts rviz and demo nodes).
-  run_cmd: "ros2 run odin_ros_driver host_sdk_sample --ros-args -p config_file:={config}"
-  save_map_service: /odin1/save_map            # odin_ros_driver/srv/SaveMap {value: 1}
-  map_saved_text: "Map transfer completed"
-  relocalization_success_text: "relocalization success!"
-  calib_yaml: ~/.ros/odin_ros_driver/calib.yaml  # written by the driver; first line = serial
-  qos_overrides: ~/odin_ws/src/odin_ros_driver/script/rosbag2_qos.yaml  # stops 400 Hz IMU drops
-  overrides:                  # applied to the copied config for every run
-    use_host_ros_time: 2      # Odin time aligned to the host clock (protocol Phase 0)
-    devstatuslog: 1
-    sendodom: 1
-    send_odom_baselink_tf: 1
-    sendimu: 1
-    senddtof: 1               # raw cloud (Phase 0 preflight, outage timing)
-    # Off: with these on, the sentry Jetson's driver dropped ODOMETRY / TF_ODOM queue entries
-    # ("Queue ... is full", 2026-10-03), which would show up as fake latency and gaps. None of
-    # them are used by the analysis.
-    sendrgb: 0
-    sendrgbcompressed: 0
-    sendrgbundistort: 0
-    sendcloudslam: 0
-    sendcloudrender: 0
-    senddepth: 0
-    sendreprojection: 0
-    sendoverlay: 0
-  connect_timeout_s: 60       # wait this long for the first /odin1/imu message after launch
-  # Thermal warm-up before collecting (protocol: 20 min). Disabled for speed: thermal effects
-  # (Tier 2) are ignored. Set back to 20 to follow the protocol.
-  warmup_min: 0
 
 # --------------------------------------------------------------------------- phases
 phases:
@@ -173,7 +132,7 @@ analysis:
   t_loglik_threshold: 10
   mc_realizations: 200        # protocol: 50+; rank tests across 6 axes need >= 180
   # holdout_session: s3      # default: last session
-  # zero-phase low-pass on the mocap truth (Hz; null = off). Odin's 10 Hz output cannot follow
+  # zero-phase low-pass on the mocap truth (Hz; null = off). A 10 Hz sensor output cannot follow
   # anything above 5 Hz, and the sentry's marker body vibrates at ~8 Hz with the motors on.
   truth_lowpass_hz: 4.0
   # one constant map-frame offset per relocalization (Odin sets odom->map when it relocalizes
@@ -181,11 +140,11 @@ analysis:
   # b ~ N(0, sigma_b^2) per relocalization
   registration_term: true
 
-# Optional: CAD / mount geometry for base_link -> Odin IMU ([tx ty tz rx ry rz], rotation vector).
+# Optional: CAD / mount geometry for base_link -> sensor body frame ([tx ty tz rx ry rz], rotation vector).
 # Pins directions planar driving cannot observe (e.g. the vertical lever arm).
 hand_eye_prior: null
 calibration_override: null
 
 preflight:
-  wall_roi: null              # [[xmin,ymin,zmin],[xmax,ymax,zmax]] box around a flat wall in Odin's frame
+  wall_roi: null              # [[xmin,ymin,zmin],[xmax,ymax,zmax]] box around a flat wall in the sensor's frame
   expected_markers: null

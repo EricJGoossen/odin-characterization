@@ -4,14 +4,13 @@ run it with `nice`).
     .venv/bin/python scripts/check_runs.py [campaigns/odin1] [--all]
 
 Checks every finished run not checked before (results cached in <dir>/checks.json; --all redoes
-them): duration, mocap rate and gaps > 20 ms, IMU rate, odom->imu rate/gaps, odom->map (relocalization
-runs), Odin driver queue drops during the run, and per-phase motion (speed for laps, stillness for
-holds). Prints OK / WARN / BAD per run.
+them): duration, mocap rate and gaps > 20 ms, IMU rate, odometry rate/gaps, registration (relocalization
+runs), problems the sensor's driver logged during the run (e.g. Odin queue drops), and per-phase motion
+(speed for laps, stillness for holds). Prints OK / WARN / BAD per run.
 """
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import sys
 from pathlib import Path
@@ -23,25 +22,28 @@ sys.path.insert(0, str(ROOT))
 
 from odin_char.bagio import read_bag  # noqa: E402
 from odin_char.robot.campaign import load_config  # noqa: E402
+from odin_char.sensors import load_sensor  # noqa: E402
 
 MOCAP_GAP = 0.02
 
 
-def driver_drops(root: Path, t0: float, t1: float) -> dict:
+def driver_issues(root: Path, sensor, t0: float, t1: float) -> tuple[dict, bool]:
+    """Problems the driver logged between t0 and t1: ({what: count}, any serious)."""
     out: dict = {}
+    serious = False
     for log in (root / "logs").glob("driver_*.log"):
         for line in log.open(errors="ignore"):
-            if "is full" not in line:
+            issue = sensor.log_issue(line)
+            if issue is None:
                 continue
             try:
                 t = float(line.split(" ", 1)[0])
             except ValueError:
                 continue
             if t0 <= t <= t1:
-                m = re.search(r"Queue (\w+) is full", line)
-                if m:
-                    out[m.group(1)] = out.get(m.group(1), 0) + 1
-    return out
+                out[issue[0]] = out.get(issue[0], 0) + 1
+                serious |= issue[1]
+    return out, serious
 
 
 def check_run(root: Path, cfg: dict, run: dict) -> tuple[str, list[str]]:
@@ -52,7 +54,7 @@ def check_run(root: Path, cfg: dict, run: dict) -> tuple[str, list[str]]:
     b = read_bag(bag, cfg)
     dur = b.t_end - b.t_start
     notes.append(f"{dur:5.0f} s")
-    fr = cfg["frames"]
+    sensor = load_sensor(cfg)
 
     def warn(msg, bad=False):
         nonlocal level
@@ -77,32 +79,32 @@ def check_run(root: Path, cfg: dict, run: dict) -> tuple[str, list[str]]:
         lost = float(gaps[gaps > MOCAP_GAP].sum()) / max(mt[-1] - mt[0], 1e-6)
         if lost > 0.05:
             warn(f"{100 * lost:.0f}% of the run inside mocap gaps")
-    # odin
-    if run.get("condition") != "odin_off":
+    # sensor
+    if run.get("condition") not in ("sensor_off", "odin_off"):
         imu = np.asarray(b.imu_t)
         irate = len(imu) / max(dur, 1e-6)
         notes.append(f"imu {irate:3.0f} Hz")
         if irate < 300:
             warn(f"IMU rate {irate:.0f} Hz", bad=irate < 100)
-        key = (fr["odin_odom"], fr["odin_imu"])
-        if key in b.tf and len(b.tf[key].t_recv) > 2:
-            ot = np.sort(np.asarray(b.tf[key].t_recv))
+        try:
+            ot = np.sort(sensor.odometry(b, use_arrival=True).t)
             og = np.diff(ot)
-            notes.append(f"odom->imu {(len(ot) - 1) / (ot[-1] - ot[0]):4.1f} Hz (max gap {og.max():.2f} s)")
+            notes.append(f"odometry {(len(ot) - 1) / (ot[-1] - ot[0]):4.1f} Hz (max gap {og.max():.2f} s)")
             if og.max() > 0.5:
-                warn(f"odom->imu gap {og.max():.1f} s")
-        else:
-            warn("no odom->imu tf", bad=True)
-        mkey = (fr["odin_odom"], fr["odin_map"])
-        nmap = len(b.tf[mkey].t_recv) if mkey in b.tf else 0
+                warn(f"odometry gap {og.max():.1f} s")
+        except KeyError:
+            warn("no odometry", bad=True)
+        try:
+            nmap = len(sensor.registration(b).t)
+        except KeyError:
+            nmap = 0
         if run["phase"] in ("phase2", "phase3", "phase4", "outage"):
             notes.append(f"odom->map {nmap}")
             if nmap == 0:
-                warn("no odom->map: Odin not relocalized during this run", bad=True)
-        drops = driver_drops(root, b.t_start, b.t_end)
-        if drops:
-            bad_q = {k: v for k, v in drops.items() if k in ("ODOMETRY", "TF_ODOM", "IMU")}
-            warn(f"driver queue drops {drops}", bad=bool(bad_q))
+                warn(f"no odom->map: {sensor.name} not relocalized during this run", bad=True)
+        issues, serious = driver_issues(root, sensor, b.t_start, b.t_end)
+        if issues:
+            warn(f"driver problems {issues}", bad=serious)
     # motion
     if len(mt) > 10:
         s = b.mocap_series()
@@ -127,7 +129,7 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     root = Path(args[0]) if args else ROOT / "campaigns" / "odin1"
     cfg = load_config(ROOT / "config" / "campaign.yaml")
-    cfg["topics"]["cloud"] = None  # never parse clouds here
+    cfg["sensor"]["topics"]["cloud"] = None  # never parse clouds here
     man = json.loads((root / "manifest.json").read_text())
     cache_p = root / "checks.json"
     cache = {} if "--all" in sys.argv or not cache_p.exists() else json.loads(cache_p.read_text())

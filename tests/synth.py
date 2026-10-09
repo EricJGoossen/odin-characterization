@@ -16,6 +16,7 @@ from rosbags.typesys import Stores, get_typestore
 from scipy.spatial.transform import Rotation
 
 from odin_char.se3 import Pose, PoseSeries, rot_z, so3_exp, yaw_of
+from odin_char.sensors import resolve_config
 
 TS = get_typestore(Stores.ROS2_HUMBLE)
 T = TS.types
@@ -214,10 +215,10 @@ def simulate_run(spec: RunSpec, tr: Truth, rng, path: Path, frames: dict):
     stamp = te - tr.time_offset
     for k in range(len(te)):
         recv = te[k] + tr.arrival_delay
-        tfs = [_tf(stamp[k], frames["odin_odom"], frames["odin_imu"], T_OI[k])]
+        tfs = [_tf(stamp[k], frames["odom"], frames["body"], T_OI[k])]
         in_cover = spec.cover is not None and (spec.cover[0] + t_true[0]) < te[k] < (spec.cover[1] + t_true[0])
         if te[k] >= t_true[0] + spec.map_start and not in_cover:
-            tfs.append(_tf(stamp[k], frames["odin_odom"], frames["odin_map"], T_OM[k]))
+            tfs.append(_tf(stamp[k], frames["odom"], frames["map"], T_OM[k]))
         streams.append((recv, 0, "/tf", T["tf2_msgs/msg/TFMessage"](transforms=tfs), "tf2_msgs/msg/TFMessage"))
     write_bag(path, streams)
 
@@ -225,7 +226,7 @@ def simulate_run(spec: RunSpec, tr: Truth, rng, path: Path, frames: dict):
 def make_campaign(root: Path, seed: int = 1, laps: int = 12, short: bool = False) -> Truth:
     rng = np.random.default_rng(seed)
     tr = Truth()
-    cfg = yaml.safe_load((Path(__file__).parents[1] / "config" / "campaign.yaml").read_text())
+    cfg = resolve_config(yaml.safe_load((Path(__file__).parents[1] / "config" / "campaign.yaml").read_text()))
     cfg["analysis"]["mc_realizations"] = 20 if short else 50
     cfg["analysis"]["truth_lowpass_hz"] = None  # synthetic truth has no marker-body vibration
     # synthetic odom->map absorbs the whole error at every sample (no per-relocalization offset in
@@ -235,7 +236,7 @@ def make_campaign(root: Path, seed: int = 1, laps: int = 12, short: bool = False
     # synthetic mocap is a tf stream on a server clock, independent of the room's real mocap setup
     cfg["mocap"] = {"source": "tf", "topic": "/tf", "parent_frame": "mocap", "child_frame": "base_link",
                     "clock": "server", "qos": "best_effort"}
-    frames = {**cfg["frames"], "mocap_world": cfg["mocap"]["parent_frame"], "mocap_body": cfg["mocap"]["child_frame"]}
+    frames = {**cfg["sensor"]["frames"], "mocap_world": cfg["mocap"]["parent_frame"], "mocap_body": cfg["mocap"]["child_frame"]}
     root.mkdir(parents=True, exist_ok=True)
     (root / "campaign.yaml").write_text(yaml.safe_dump(cfg))
     specs: list[RunSpec] = []

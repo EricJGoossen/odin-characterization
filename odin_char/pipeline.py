@@ -32,6 +32,7 @@ from .fogm import fit_fogm
 from .latency import regress_latency, xcorr_latency
 from .model import AxisParams, Tier0Model
 from .se3 import Pose
+from .sensors import load_sensor, resolve_config
 from .static_field import StaticField, cross_session_r2, leave_one_session_out_residual
 from .validate import TIER1_HINTS, validate
 
@@ -55,12 +56,12 @@ def _jsonable(o):
 class Campaign:
     def __init__(self, root: Path, cfg: dict):
         self.root = root
-        self.cfg = cfg
+        self.cfg = cfg = resolve_config(cfg)
+        self.sensor = load_sensor(cfg)
         self.manifest = json.loads((root / "manifest.json").read_text())
         self.runs = {r["id"]: r for r in self.manifest["runs"]}
         self.cache = root / "cache"
         self.cache.mkdir(exist_ok=True)
-        self.frames = cfg["frames"]
         a = cfg.get("analysis", {})
         self.rate = a.get("consumer_rate_hz", 10.0)
         self.dt = 1.0 / self.rate
@@ -96,13 +97,13 @@ class Campaign:
 
     def errors(self, runs: list[dict], calib: Calibration, tau_d: float) -> ErrorTable:
         tabs = [
-            compute_errors(self.bag(r), self.frames, calib, r["id"], self.meta(r), tau_d, self.rate, self.use_arrival)
+            compute_errors(self.bag(r), self.sensor, calib, r["id"], self.meta(r), tau_d, self.rate, self.use_arrival)
             for r in runs
         ]
         return ErrorTable.concat([t for t in tabs if len(t)])
 
     def reloc_segments(self, calib: Calibration) -> list:
-        """odom->map stretches of every run, linked into relocalization instances (cached)."""
+        """Registration (odom->map) stretches of every run, linked into relocalization instances (cached)."""
         key = round(calib.time_offset, 9)
         if getattr(self, "_segs_key", None) == key:
             return self._segs
@@ -111,7 +112,7 @@ class Campaign:
             if r["phase"] == "preflight" or r.get("excluded"):
                 continue
             try:
-                s = self.bag(r).tf_series(self.frames["odin_odom"], self.frames["odin_map"], self.use_arrival)
+                s = self.sensor.registration(self.bag(r), self.use_arrival)
             except KeyError:
                 continue
             t = s.t + (0.0 if self.use_arrival else calib.time_offset)
@@ -133,7 +134,7 @@ class Campaign:
     def map_updates(self, run: dict, calib: Calibration) -> np.ndarray:
         b = self.bag(run)
         try:
-            s = b.tf_series(self.frames["odin_odom"], self.frames["odin_map"], self.use_arrival)
+            s = self.sensor.registration(b, self.use_arrival)
         except KeyError:
             return np.zeros(0)
         return s.t + (0.0 if self.use_arrival else calib.time_offset)
@@ -141,13 +142,15 @@ class Campaign:
 
 # ------------------------------------------------------------------------------------ steps
 def step_preflight(c: Campaign, out: dict):
-    runs = {r.get("condition"): r for r in c.runs_of("preflight")}
+    # campaigns recorded before the sensor split call the sensor conditions odin_on / odin_off
+    legacy = {"odin_on": "sensor_on", "odin_off": "sensor_off"}
+    runs = {legacy.get(r.get("condition"), r.get("condition")): r for r in c.runs_of("preflight")}
     res = {}
     if "mocap_on" in runs and "mocap_off" in runs:
-        res["odin_side"] = preflight.odin_side(c.bag(runs["mocap_on"]), c.bag(runs["mocap_off"]))
-    if "odin_on" in runs and "odin_off" in runs:
+        res["sensor_side"] = preflight.sensor_side(c.bag(runs["mocap_on"]), c.bag(runs["mocap_off"]))
+    if "sensor_on" in runs and "sensor_off" in runs:
         res["mocap_side"] = preflight.mocap_side(
-            c.bag(runs["odin_on"]), c.bag(runs["odin_off"]), c.cfg.get("preflight", {}).get("expected_markers")
+            c.bag(runs["sensor_on"]), c.bag(runs["sensor_off"]), c.cfg.get("preflight", {}).get("expected_markers")
         )
     if res:
         res["pass"] = all(preflight.passed(v) for v in res.values())
@@ -166,10 +169,10 @@ def step_calibration(c: Campaign, out: dict) -> Calibration:
     b = c.bag(runs[-1])
     mocap = b.mocap_series()
     to = imu_mocap_time_offset(np.array(b.imu_t), np.array(b.imu_gyro), mocap)
-    odom_raw = b.tf_series(c.frames["odin_odom"], c.frames["odin_imu"])
+    odom_raw = c.sensor.odometry(b)
     odom_lag = pose_mocap_time_offset(odom_raw, mocap)
-    odin = odom_raw.shifted(odom_lag.offset)
-    A, B = relative_motion_pairs(mocap, odin)
+    odom = odom_raw.shifted(odom_lag.offset)
+    A, B = relative_motion_pairs(mocap, odom)
     pr = c.cfg.get("hand_eye_prior")
     prior = Pose.from_vec(np.array(pr["X"])) if pr else None
     he = hand_eye(A, B, prior, **({k: pr[k] for k in ("prior_sigma_t", "prior_sigma_rot_deg") if pr and k in pr}))
@@ -387,7 +390,7 @@ def step_latency_check(c: Campaign, calib: Calibration, tau_d: float, out: dict)
         return
     taus = {"position": [], "yaw": []}
     for r in runs:
-        x = xcorr_latency(c.bag(r), c.frames, calib, c.use_arrival)
+        x = xcorr_latency(c.bag(r), c.sensor, calib, c.use_arrival)
         if np.isfinite(x.tau_position):
             taus["position"].append(x.tau_position)
         if np.isfinite(x.tau_yaw):
@@ -406,7 +409,7 @@ def step_latency_check(c: Campaign, calib: Calibration, tau_d: float, out: dict)
 
 def refine_cover_times(b: BagData, t_cover: float, t_uncover: float, calib: Calibration) -> tuple[float, float]:
     """The announced cover/uncover times include the operator's reaction time; when the cloud was
-    recorded, use the frames where Odin's point count collapses instead."""
+    recorded, use the frames where the sensor's point count collapses instead."""
     if len(b.cloud_n) < 20:
         return t_cover, t_uncover
     t = np.asarray(b.cloud_t) + calib.time_offset
@@ -421,7 +424,7 @@ def refine_cover_times(b: BagData, t_cover: float, t_uncover: float, calib: Cali
 
 def natural_losses(c: Campaign, tab: ErrorTable, calib: Calibration) -> list:
     """LOST events in tracked data, minus deliberate driver restarts (INIT trials and session
-    starts relaunch Odin inside a recorded run; odom->map stops then too, but nothing was lost)."""
+    starts relaunch the sensor inside a recorded run; odom->map stops then too, but nothing was lost)."""
     restarts = [(tr["t_launch"] - 15.0, (tr.get("t_log_success") or tr["t_launch"] + tr["timeout"]) + 2.0)
                 for tr in c.manifest.get("init_trials", [])]
     ups = {int(r): c.map_updates(c.runs[int(r)], calib) for r in np.unique(tab.run)}
@@ -430,11 +433,11 @@ def natural_losses(c: Campaign, tab: ErrorTable, calib: Calibration) -> list:
 
 def outage_reregistration(c: Campaign, calib: Calibration, run: dict, tab: ErrorTable, t_cover: float,
                           t_uncover: float) -> dict:
-    """What a covered window does to the pose output: how long odom->imu stops, and how far the
-    map-frame offset moved between before the cover and after output resumes (Odin keeps its
-    odom->map, so dead-reckoning drift during the outage stays in the estimate)."""
+    """What a covered window does to the pose output: how long the odometry stops, and how far the
+    map-frame offset moved between before the cover and after output resumes (Odin, for one, keeps
+    its odom->map, so dead-reckoning drift during the outage stays in the estimate)."""
     b = c.bag(run)
-    oi = b.tf_series(c.frames["odin_odom"], c.frames["odin_imu"], c.use_arrival).t
+    oi = c.sensor.odometry(b, c.use_arrival).t
     oi = oi + (0.0 if c.use_arrival else calib.time_offset)
     win = oi[(oi > t_cover - 1.0) & (oi < t_uncover + 15.0)]
     gaps = np.diff(win)
@@ -459,7 +462,7 @@ def step_events(c: Campaign, calib: Calibration, model: Tier0Model, out: dict, t
         fix_t = None
         try:
             # the bag can start before the driver restart: odom->map from the previous driver is not this fix
-            s = b.tf_series(c.frames["odin_odom"], c.frames["odin_map"], use_arrival=True)
+            s = c.sensor.registration(b, use_arrival=True)
             after = s.t[s.t > tr["t_launch"]]
             fix_t = float(after[0]) if len(after) else None
         except KeyError:
@@ -621,6 +624,7 @@ def analyze(root: Path, cfg: dict) -> dict:
         lo, hi = tab.pos_M[:, :2].min(0) - 0.5, tab.pos_M[:, :2].max(0) + 0.5
         np.savez(res_dir / "static_field_grid.npz", **model.static_field.export_grid(lo, hi))
     figs = out.pop("_figs")
+    out["sensor"] = {"type": c.sensor.type, "name": c.sensor.name}
     (res_dir / "results.json").write_text(json.dumps(_jsonable(out), indent=2))
     from .report import write_report
 

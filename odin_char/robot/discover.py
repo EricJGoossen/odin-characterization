@@ -1,27 +1,31 @@
 """Find the mocap stream on the live ROS 2 graph.
 
-    python -m odin_char.robot.discover [--seconds 5]
+    python -m odin_char.robot.discover [--seconds 5] [--config config/campaign.yaml]
 
 Lists every topic whose type can carry a mocap pose (TFMessage, PoseStamped, TransformStamped,
 Odometry), its rate, frame ids and the arrival-minus-stamp offset (a big offset means the stamps
 come from another clock, i.e. mocap.clock: server), then prints a `mocap:` block to paste into
-config/campaign.yaml for the best candidate. Odin's own frames/topics are listed but not suggested.
+config/campaign.yaml for the best candidate. The sensor's own frames/topics are listed but not suggested.
 """
 from __future__ import annotations
 
 import argparse
 import time
 from collections import defaultdict
+from pathlib import Path
+
+import yaml
 
 from ..mocap_config import MSGTYPES
-
-ODIN_FRAMES = {"odom", "imu", "map", "lidar", "camera_0"}
+from ..sensors import load_sensor
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seconds", type=float, default=5.0)
+    ap.add_argument("--config", type=Path, default=Path(__file__).parents[2] / "config" / "campaign.yaml")
     args = ap.parse_args()
+    sensor = load_sensor(yaml.safe_load(args.config.read_text()))
 
     import rclpy
     from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -75,10 +79,10 @@ def main():
         print(f"{topic:36s} {parent:20s} {child:20s} {rate:8.1f} {off:13.3f}s")
 
     kinds = {n: by_type[t] for n, t in topics}
-    cand = [r for r in rows if r[1] not in ODIN_FRAMES and r[2] not in ODIN_FRAMES and r[3] > 20
-            and not r[0].startswith("/odin1") and r[0] != "/tf_static"]
+    cand = [r for r in rows if not sensor.owns(frame=r[1]) and not sensor.owns(frame=r[2]) and r[3] > 20
+            and not sensor.owns(topic=r[0]) and r[0] != "/tf_static"]
     if not cand:
-        print("\nno obvious mocap candidate (> 20 Hz, not Odin). Pick from the table above.")
+        print(f"\nno obvious mocap candidate (> 20 Hz, not {sensor.name}). Pick from the table above.")
         return
     topic, parent, child, rate, off = cand[0]
     kind = kinds[topic]

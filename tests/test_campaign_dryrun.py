@@ -13,8 +13,9 @@ import pytest
 import yaml
 
 from odin_char.robot.campaign import Campaign
-from odin_char.robot.processes import OdinDriver
 from odin_char.robot.ros_io import RosIO
+from odin_char.sensors import resolve_config
+from odin_char.sensors.odin.driver import OdinDriver
 
 G_TRUE = np.array([[0.85, 0.03, 0.0], [-0.02, 0.8, 0.0], [0.0, 0.0, 1.15]])
 
@@ -34,7 +35,7 @@ class FakeCmd:
 
 class FakeDriver(OdinDriver):
     def __init__(self, cfg, root):
-        super().__init__(cfg)
+        super().__init__(resolve_config(cfg)["sensor"]["driver"])
         self.root = root
         self._alive = False
         self.starts = []
@@ -90,7 +91,7 @@ class World:
         from collections import deque
 
         self.mocap_hist = deque(maxlen=2000)
-        self.last_imu_arrival = None
+        self.last_heartbeat_arrival = None
         self.first_map_tf_arrival = None
         self.last_map_tf_arrival = None
         self.max_abs = np.zeros(2)
@@ -127,7 +128,7 @@ class World:
             with self._lock:
                 self.mocap_hist.append((now, now + 100.0, *self.pose))  # server clock offset
             if self.driver.alive():
-                self.last_imu_arrival = time.time()
+                self.last_heartbeat_arrival = time.time()
                 if self.driver.mode == 2 and "relocalized" in self.driver.events and self.first_map_tf_arrival is None:
                     self.first_map_tf_arrival = time.time()
             time.sleep(0.005)
@@ -135,11 +136,11 @@ class World:
 
 @pytest.fixture
 def small_cfg(tmp_path):
-    cfg = yaml.safe_load((Path(__file__).parents[1] / "config" / "campaign.yaml").read_text())
+    cfg = resolve_config(yaml.safe_load((Path(__file__).parents[1] / "config" / "campaign.yaml").read_text()))
     base = tmp_path / "control_command.yaml"
     base.write_text(yaml.safe_dump({"register_keys": {"custom_map_mode": 1, "use_host_ros_time": 0}}))
-    cfg["driver"]["base_config"] = str(base)
-    cfg["driver"]["warmup_min"] = 0
+    cfg["sensor"]["driver"]["base_config"] = str(base)
+    cfg["sensor"]["warmup_min"] = 0
     cfg["room"] = {"fence_min": [-3.0, -2.0], "fence_max": [3.0, 2.0], "margin": 0.3, "home": [0.0, 0.0, 0.0]}
     ph = cfg["phases"]
     ph["preflight"]["duration_s"] = 1

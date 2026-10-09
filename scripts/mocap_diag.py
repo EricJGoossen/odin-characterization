@@ -14,7 +14,7 @@ from odin_char.robot.campaign import load_config  # noqa: E402
 
 bag = Path(sys.argv[1])
 cfg = load_config(ROOT / "config" / "campaign.yaml")
-cfg["topics"]["cloud"] = None
+cfg["sensor"]["topics"]["cloud"] = None
 topic = cfg["mocap"]["topic"]
 from rosbags.highlevel import AnyReader  # noqa: E402
 from rosbags.typesys import Stores, get_typestore  # noqa: E402

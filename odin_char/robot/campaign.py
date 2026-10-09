@@ -1,17 +1,17 @@
-"""Autonomous Odin1 Tier 0 data collection on the ARUW sentry.
+"""Autonomous Tier 0 data collection on the ARUW sentry, for the sensor in campaign.yaml `sensor:`.
 
     python -m odin_char.robot.campaign --config config/campaign.yaml --dir campaigns/odin1 <step>
 
 Bring-up / debugging (nothing recorded; run these first on a new setup):
     mocap      print the live mocap stream for 10 s (rate, pose, clock offset, fence)
-    odin       start the Odin driver for 20 s and report its topics/tf rates
+    sensor     start the sensor's driver for 20 s and report its topics/tf rates
     jog        small open-loop pulses; prints how the robot actually moved for each command
 
 Steps (run in this order; `day1` and `day2` chain them):
     check      mocap live, robot inside the fence, bridge moves the robot (command-gain ID)
-    preflight  Phase 0 IR interference (prompts to toggle mocap strobes and Odin power)
+    preflight  Phase 0 IR interference (prompts to toggle mocap strobes and sensor power)
     calib      Phase 1a/1b: rotation-rich motion in odometry mode
-    map        Phase 1c: SLAM-mode coverage + loop closures, map saved via /odin1/save_map
+    map        Phase 1c: SLAM-mode coverage + loop closures, map saved by the driver
     session    Phase 2: one session (fresh relocalization start, 10 nominal laps, speed sweep)
     holds      Phase 3: 10 min stationary holds
     latency    Phase 4: sinusoidal translation and yaw
@@ -62,7 +62,8 @@ from .motion import (
     wrap,
     yaw_sinusoid,
 )
-from .processes import BagRecorder, OdinDriver, sha256
+from ..sensors import Mode, load_sensor, resolve_config
+from .processes import BagRecorder, sha256
 
 
 class Abort(RuntimeError):
@@ -78,7 +79,9 @@ def beep(n: int = 1):
 
 class Campaign:
     def __init__(self, cfg: dict, root: Path, prompts: bool, skip_warmup: bool, io=None):
+        cfg = resolve_config(cfg)
         self.cfg = cfg
+        self.sensor = load_sensor(cfg)
         self.root = root
         self.prompts = prompts
         self.skip_warmup = skip_warmup
@@ -101,10 +104,11 @@ class Campaign:
         if io is None:  # real robot
             from .ros_io import CommandSender, RosIO
 
-            io = (RosIO(cfg), CommandSender(rb["bridge_host"], rb["bridge_port"]), OdinDriver(cfg), BagRecorder(cfg))
+            io = (RosIO(cfg), CommandSender(rb["bridge_host"], rb["bridge_port"]), self.sensor.make_driver(),
+                  BagRecorder(cfg))
         self.ros, self.cmd, self.driver, self.rec = io  # injectable for the dry-run test
         self.gains_checked = False
-        self.warm_since: float | None = None  # host time Odin started running in this invocation
+        self.warm_since: float | None = None  # host time the sensor started running in this invocation
 
     # ------------------------------------------------------------------ bookkeeping
     def save(self):
@@ -135,7 +139,6 @@ class Campaign:
     def metadata_row(self, run: dict, speed=None):
         path = self.root / "metadata.csv"
         new = not path.exists()
-        drv = self.cfg["driver"]
         map_path = self.state.get("map_path")
         row = {
             "date": datetime.now().isoformat(timespec="seconds"),
@@ -230,29 +233,29 @@ class Campaign:
     def start_driver(self, mode: int, run_dir: Path, tag: str):
         if self.driver.alive():
             self.driver.stop()
-        conf = run_dir / f"control_command_{tag}.yaml"
-        map_path = Path(self.state["map_path"]) if mode == 2 else None
-        if mode == 2 and (map_path is None or not map_path.exists()):
+        map_path = Path(self.state["map_path"]) if "map_path" in self.state and mode == Mode.RELOCALIZE else None
+        if mode == Mode.RELOCALIZE and (map_path is None or not map_path.exists()):
             raise Abort("relocalization needs a map: run the 'map' step first")
-        map_dest = self.root / "maps" if mode == 1 else None
-        self.driver.write_config(conf, mode, reloc_map=map_path, map_dest=map_dest, map_name="map.bin")
+        conf = self.driver.prepare(run_dir, tag, mode, reloc_map=map_path)
         self.ros.reset_map_watch()
         self.driver.start(conf, run_dir / f"driver_{tag}.log", mode)
-        t_end = time.time() + self.cfg["driver"]["connect_timeout_s"]
+        t_end = time.time() + self.sensor.connect_timeout_s
+        sn = self.sensor.name
         while time.time() < t_end:
-            if self.ros.last_imu_arrival and self.ros.last_imu_arrival > self.driver.started_at:
+            hb = self.ros.last_heartbeat_arrival
+            if hb and hb > self.driver.started_at:
                 return conf
             if not self.driver.alive():
-                raise Abort(f"odin driver exited during start; see {self.driver.log_path}")
+                raise Abort(f"{sn} driver exited during start; see {self.driver.log_path}")
             time.sleep(0.2)
-        raise Abort("odin driver did not publish IMU data; is Odin connected?")
+        raise Abort(f"{sn} driver did not publish {self.sensor.heartbeat[0]}; is {sn} connected?")
 
     def warmup(self, mode: int):
-        """Protocol: >= warmup_min of Odin running before every collection, identically each time.
+        """Protocol: >= warmup_min of the sensor running before every collection, identically each time.
 
         Warm time is counted from the first driver start of this invocation (the device stays
-        powered across driver restarts and mode changes); powering Odin off resets it."""
-        need = self.cfg["driver"]["warmup_min"] * 60
+        powered across driver restarts and mode changes); powering the sensor off resets it."""
+        need = self.sensor.warmup_min * 60
         if not self.driver.alive() or self.driver.mode != mode:
             self.start_driver(mode, self.root / "logs", f"warmup_{int(time.time())}")
         if self.warm_since is None:
@@ -263,11 +266,11 @@ class Campaign:
         if self.skip_warmup:
             print("[warm-up skipped by --skip-warmup]")
             return
-        print(f"warming Odin up: {remaining / 60:.1f} min to go ...")
+        print(f"warming {self.sensor.name} up: {remaining / 60:.1f} min to go ...")
         self.wait_still(remaining)
 
     def relocalize(self, timeout: float) -> float | None:
-        """Wait for the first odom->map (or the driver's success line). Returns host time."""
+        """Wait for the sensor's first fix tf (or the driver's success line). Returns host time."""
         t_end = time.time() + timeout
         while time.time() < t_end:
             if self.ros.first_map_tf_arrival is not None:
@@ -275,14 +278,14 @@ class Campaign:
             if "relocalized" in self.driver.events:
                 return self.driver.events["relocalized"]
             if not self.driver.alive():
-                raise Abort("odin driver exited")
+                raise Abort(f"{self.sensor.name} driver exited")
             self.pose()
             time.sleep(0.05)
         return None
 
     def fresh_relocalized_start(self, run_dir: Path, tag: str) -> tuple[float, float | None]:
-        """Fresh driver start in mode 2. If no fix while still, do the standard motion once."""
-        self.start_driver(2, run_dir, tag)
+        """Fresh driver start in relocalization mode. If no fix while still, do the standard motion once."""
+        self.start_driver(Mode.RELOCALIZE, run_dir, tag)
         t_launch = self.driver.started_at
         tout = self.cfg["phases"]["phase5"]["timeout_s"]
         fix = self.relocalize(tout)
@@ -293,8 +296,8 @@ class Campaign:
         return t_launch, fix
 
     def save_map_into_campaign(self) -> Path:
-        """Save Odin's SLAM map and keep a copy at <campaign>/maps/map.bin (the driver logs where it
-        really wrote the file; it may differ from the configured folder)."""
+        """Save the sensor's SLAM map and keep a copy at <campaign>/maps/map.bin (the driver reports
+        where it really wrote the file; it may differ from the configured folder)."""
         print("saving map (the device generates it first; this can take a few minutes) ...")
         saved = self.driver.save_map()
         target = self.driver.event_lines.get("map_save_target", "")
@@ -373,20 +376,20 @@ class Campaign:
         if rate < 50:
             print("WARNING: mocap rate below 50 Hz (the protocol wants >= 100 Hz)")
 
-    def step_odin(self, seconds: float = 20.0):
-        """Start the Odin driver in odometry mode, report what it publishes, stop it. Nothing moves."""
+    def step_sensor(self, seconds: float = 20.0):
+        """Start the sensor's driver in odometry mode, report what it publishes, stop it. Nothing moves."""
         run_dir = self.root / "logs"
-        self.start_driver(0, run_dir, f"odin_check_{int(time.time())}")
+        self.start_driver(Mode.ODOMETRY, run_dir, f"sensor_check_{int(time.time())}")
         print(f"driver up (log: {self.driver.log_path}); listening {seconds:.0f} s ...")
-        i0, p0 = self.ros.imu_count, dict(self.ros.tf_pair_counts)
+        h0, p0 = self.ros.heartbeat_count, dict(self.ros.tf_pair_counts)
         time.sleep(seconds)
-        print(f"  /odin1/imu: {(self.ros.imu_count - i0) / seconds:.0f} Hz")
+        print(f"  {self.sensor.heartbeat[0]}: {(self.ros.heartbeat_count - h0) / seconds:.0f} Hz")
         for pair, n in sorted(self.ros.tf_pair_counts.items()):
             print(f"  tf {pair[0]} -> {pair[1]}: {(n - p0.get(pair, 0)) / seconds:.0f} Hz")
-        need = (self.cfg["frames"]["odin_odom"], self.cfg["frames"]["odin_imu"])
-        if need not in self.ros.tf_pair_counts:
-            print(f"WARNING: no {need[0]} -> {need[1]} tf: check send_odom_baselink_tf / frames in the config")
-        print(f"  device serial (calib.yaml): {self.driver.device_serial()}")
+        need = self.sensor.odometry_tf
+        if need and need not in self.ros.tf_pair_counts:
+            print(f"WARNING: no {need[0]} -> {need[1]} tf: check the driver settings / sensor.frames in the config")
+        print(f"  device serial: {self.driver.device_serial()}")
         self.driver.stop()
 
     def step_jog(self, speed: float = 0.15, rate: float = 0.5, seconds: float = 0.6):
@@ -427,7 +430,7 @@ class Campaign:
         if not self.fence.inside(pose, self.fence.margin + 0.6):
             raise Abort("put the robot at least 1 m inside the fence before starting")
         if self.driver.already_running() and not self.driver.alive():
-            raise Abort("a separate odin driver is running; stop it (the campaign starts its own)")
+            raise Abort(f"a separate {self.sensor.name} driver is running; stop it (the campaign starts its own)")
         # clock sanity: arrival vs server stamps (informative only)
         with self.ros._lock:
             h = list(self.ros.mocap_hist)
@@ -472,11 +475,11 @@ class Campaign:
     def step_preflight(self):
         dur = self.cfg["phases"]["preflight"]["duration_s"]
         run_dir = self.root / "logs"
-        self.warmup(0)
+        self.warmup(Mode.ODOMETRY)
         r = self.new_run("preflight_mocap_on", "preflight", condition="mocap_on")
         self.record(r, lambda: self.wait_still(dur), with_cloud=True)
-        # mocap side, Odin on (same scene) is the run above; reuse it as odin_on
-        self.manifest["runs"].append({**r, "id": len(self.manifest["runs"]), "condition": "odin_on"})
+        # mocap side, sensor on (same scene) is the run above; reuse it as sensor_on
+        self.manifest["runs"].append({**r, "id": len(self.manifest["runs"]), "condition": "sensor_on"})
         if self.prompt("Turn the mocap STROBES OFF (keep the robot still)."):
             r = self.new_run("preflight_mocap_off", "preflight", condition="mocap_off")
             self.rec.start(self.root / r["bag"], True)
@@ -485,17 +488,17 @@ class Campaign:
             self.save()
             self.prompt("Turn the mocap strobes back ON.")
         self.driver.stop()
-        if self.prompt("Power Odin OFF (unplug it) for the mocap-side check."):
-            r = self.new_run("preflight_odin_off", "preflight", condition="odin_off")
+        if self.prompt(f"Power {self.sensor.name} OFF (unplug it) for the mocap-side check."):
+            r = self.new_run("preflight_sensor_off", "preflight", condition="sensor_off")
             self.record(r, lambda: self.wait_still(dur))
-            self.prompt("Power Odin back ON.")
+            self.prompt(f"Power {self.sensor.name} back ON.")
             self.warm_since = None  # device was off: warm up again
-        self.start_driver(0, run_dir, f"after_preflight_{int(time.time())}")
+        self.start_driver(Mode.ODOMETRY, run_dir, f"after_preflight_{int(time.time())}")
         self.mark("preflight")
 
     def step_calib(self):
         ph = self.cfg["phases"]["calib"]
-        self.warmup(0)
+        self.warmup(Mode.ODOMETRY)
         center = self.cfg["room"]["home"]
         tr = calib_motion(center, ph["duration_s"], radius=0.8)
         r = self.new_run("calib", "calib")
@@ -512,8 +515,8 @@ class Campaign:
         tr = follow_path(path, ph["speed"], self.cfg["robot"]["max_accel"])
         self.execute(self.goto(tr.start), "to_map_start")
         run_dir = self.root / "logs"
-        self.warmup(1)
-        self.start_driver(1, run_dir, "mapping")  # fresh SLAM map, started at the path's start pose
+        self.warmup(Mode.MAPPING)
+        self.start_driver(Mode.MAPPING, run_dir, "mapping")  # fresh SLAM map, started at the path's start pose
         time.sleep(3.0)
         start_pose = self.pose()
         r = self.new_run("mapping", "mapping")
@@ -535,15 +538,15 @@ class Campaign:
         a_max = self.cfg["robot"]["max_accel"]
         mk = lambda speed, laps: figure8(p2["center"], p2["half_length"], p2["half_width"], rot, laps, speed, a_max)
         nominal = mk(p2["nominal_speed"], p2["nominal_laps"])
-        self.warmup(2)
+        self.warmup(Mode.RELOCALIZE)
         self.execute(self.goto(nominal.start), "to_figure8")
         run_dir = self.root / "logs"
         # fresh start inside the first bag: it is also a Phase 5 INIT trial
         r = self.new_run(f"{sid}_1x", "phase2", session=sid, speed_class="1x")
-        r["driver_config"] = str(run_dir / f"control_command_{sid}.yaml")
 
         def first():
             t_launch, fix = self.fresh_relocalized_start(run_dir, sid)
+            r["driver_config"] = str(self.driver.config_path or "")
             self.manifest["init_trials"].append({"run": r["id"], "offset_m": 0.0, "heading_deg": 0.0, "moving": False,
                                                  "t_launch": t_launch, "t_log_success": self.driver.events.get("relocalized"),
                                                  "timeout": self.cfg["phases"]["phase5"]["timeout_s"], "source": "session_start"})
@@ -562,11 +565,11 @@ class Campaign:
         self.mark(f"session_{sid}")
 
     def ensure_tracking(self):
-        """Driver running in mode 2 with a fix."""
-        if self.driver.alive() and self.driver.mode == 2 and self.ros.first_map_tf_arrival is not None:
+        """Driver running in relocalization mode with a fix."""
+        if self.driver.alive() and self.driver.mode == Mode.RELOCALIZE and self.ros.first_map_tf_arrival is not None:
             return
-        self.warmup(2)
-        if self.ros.first_map_tf_arrival is None or self.driver.mode != 2:
+        self.warmup(Mode.RELOCALIZE)
+        if self.ros.first_map_tf_arrival is None or self.driver.mode != Mode.RELOCALIZE:
             _, fix = self.fresh_relocalized_start(self.root / "logs", f"reloc_{int(time.time())}")
             if fix is None:
                 raise Abort("could not relocalize")
@@ -624,7 +627,7 @@ class Campaign:
         if "mapping_start_pose" not in self.state:
             raise Abort("run the 'map' step first (INIT offsets are relative to the mapping start)")
         ph = self.cfg["phases"]["phase5"]
-        self.warmup(2)
+        self.warmup(Mode.RELOCALIZE)
         run_dir = self.root / "logs"
         trials = self.init_start_poses()
         done = {t.get("key") for t in self.manifest["init_trials"]}
@@ -638,7 +641,7 @@ class Campaign:
             r = self.new_run(key, "init")
 
             def body(tr=tr, key=key, r=r):
-                self.start_driver(2, run_dir, key)
+                self.start_driver(Mode.RELOCALIZE, run_dir, key)
                 t_launch = self.driver.started_at
                 if tr["moving"]:
                     time.sleep(1.0)
@@ -666,7 +669,7 @@ class Campaign:
         home = self.cfg["room"]["home"]
         done = {o.get("key") for o in self.manifest["outages"]}
         if not auto:
-            self.prompt("Outage trials: stand next to the robot, ready to cover Odin's window with your hand. "
+            self.prompt(f"Outage trials: stand next to the robot, ready to cover {self.sensor.name}'s window with your hand. "
                         "Cover on 'COVER NOW', uncover on 'UNCOVER NOW'.")
         for dur in ph["cover_durations_s"]:
             for rep in range(ph["cover_repeats"]):
@@ -710,7 +713,7 @@ class Campaign:
             print(f"\n\n          ######## {text} ########\n", flush=True)
 
     # ------------------------------------------------------------------ main
-    BRINGUP = ["survey", "mocap", "odin", "jog"]  # set-up / debugging aids, always run, never recorded
+    BRINGUP = ["survey", "mocap", "sensor", "jog"]  # set-up / debugging aids, always run, never recorded
 
     def step_survey(self):
         raise Abort("survey is driven by hand: run it with robot.control: human")
@@ -759,14 +762,15 @@ class Campaign:
             finally:
                 try:
                     self.driver.stop()
-                    self.driver.restore_config()  # the user's control_command.yaml back in place
+                    self.driver.restore_config()  # undo the driver's per-run config changes
                 finally:
                     self.ros.shutdown()
 
 
 def load_config(path: Path) -> dict:
-    """campaign.yaml, overlaid with room.yaml next to it (written by the `survey` step)."""
-    cfg = yaml.safe_load(path.read_text())
+    """campaign.yaml (with the sensor's defaults filled in), overlaid with room.yaml next to it
+    (written by the `survey` step)."""
+    cfg = resolve_config(yaml.safe_load(path.read_text()))
     room = path.parent / "room.yaml"
     if room.exists():
         over = yaml.safe_load(room.read_text()) or {}
@@ -783,16 +787,17 @@ def main():
     ap.add_argument("--config", type=Path, default=Path(__file__).parents[2] / "config" / "campaign.yaml")
     ap.add_argument("--dir", type=Path, required=True, help="campaign directory (created if missing)")
     ap.add_argument("--no-prompt", action="store_true", help="skip steps that need a person")
-    ap.add_argument("--skip-warmup", action="store_true", help="skip the warm-up even if driver.warmup_min > 0")
+    ap.add_argument("--skip-warmup", action="store_true", help="skip the warm-up even if sensor.warmup_min > 0")
     ap.add_argument("--redo", action="store_true", help="repeat steps already marked done")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if (args.dir / "campaign.yaml").exists() and args.config.resolve() != (args.dir / "campaign.yaml").resolve():
-        old = yaml.safe_load((args.dir / "campaign.yaml").read_text())
+        old = resolve_config(yaml.safe_load((args.dir / "campaign.yaml").read_text()))
         mf = args.dir / "manifest.json"
         has_runs = mf.exists() and bool(json.loads(mf.read_text()).get("runs"))
-        if has_runs and (old.get("frames") != cfg.get("frames") or old.get("mocap") != cfg.get("mocap")):
-            sys.exit("frames/mocap differ from this campaign's recorded runs; use the same config, "
+        same = lambda c: (c["sensor"]["type"], c["sensor"].get("frames"), c["sensor"].get("topics"), c.get("mocap"))
+        if has_runs and same(old) != same(cfg):
+            sys.exit("sensor/frames/mocap differ from this campaign's recorded runs; use the same config, "
                      "or a new --dir for a new campaign")
         shutil.copy(args.dir / "campaign.yaml", args.dir / f"campaign.yaml.{int(time.time())}.bak")
     control = cfg["robot"].get("control", "human")

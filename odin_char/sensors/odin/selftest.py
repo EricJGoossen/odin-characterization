@@ -1,7 +1,7 @@
-"""Hardware self-test on the robot computer, without mocap (nothing is commanded).
+"""Odin hardware self-test on the robot computer, without mocap (nothing is commanded).
 
-    .venv/bin/python scripts/hw_selftest.py [--dir /tmp/odin_itest]
-    (run with ROS 2 and the odin_ros_driver workspace sourced; scripts/run_campaign.sh does that)
+    .venv/bin/python -m odin_char.sensors.odin.selftest [--dir /tmp/odin_itest]
+    (run with ROS 2 and the odin_ros_driver workspace sourced: source odin_char/sensors/odin/env.sh)
 
 Uses the campaign's own code to: start Odin in SLAM mode, record a bag (with the point cloud),
 save the map via /odin1/save_map, restart Odin in relocalization mode on that map, wait for the
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def main():
@@ -25,13 +25,11 @@ def main():
     ap.add_argument("--config", type=Path, default=ROOT / "config" / "campaign.yaml")
     ap.add_argument("--save-timeout", type=float, default=180.0, help="seconds to wait for map generation")
     args = ap.parse_args()
-    import sys
-
-    sys.path.insert(0, str(ROOT))
     from odin_char.bagio import read_bag
     from odin_char.robot.human import HumanCampaign
+    from odin_char.sensors import Mode, resolve_config
 
-    cfg = yaml.safe_load(args.config.read_text())
+    cfg = resolve_config(yaml.safe_load(args.config.read_text()))
     if args.dir.exists():
         shutil.rmtree(args.dir)  # only this self-test's own scratch folder
     results = []
@@ -40,12 +38,12 @@ def main():
         results.append((name, ok))
         print(f"[{'PASS' if ok else 'FAIL'}] {name} {detail}", flush=True)
 
-    cfg["driver"]["save_map_timeout_s"] = args.save_timeout
+    cfg["sensor"]["driver"]["save_map_timeout_s"] = args.save_timeout
     c = HumanCampaign(cfg, args.dir, prompts=True, skip_warmup=True)
     logs = args.dir / "logs"
     try:
         # SLAM mode + recording + map save
-        c.start_driver(1, logs, "itest_slam")
+        c.start_driver(Mode.MAPPING, logs, "itest_slam")
         check("driver starts in SLAM mode (IMU flowing)", True, f"log {c.driver.log_path}")
         bag1 = args.dir / "bags" / "slam"
         c.rec.start(bag1, with_cloud=True)
@@ -71,7 +69,7 @@ def main():
         c.state["map_path"] = str(mp)
 
         # relocalization mode on that map
-        c.start_driver(2, logs, "itest_reloc")
+        c.start_driver(Mode.RELOCALIZE, logs, "itest_reloc")
         t0 = c.driver.started_at
         bag2 = args.dir / "bags" / "reloc"
         c.rec.start(bag2, with_cloud=False)
@@ -85,13 +83,12 @@ def main():
 
         # read back with the analysis reader
         b1, b2 = read_bag(bag1, cfg), read_bag(bag2, cfg)
-        fr = cfg["frames"]
         n = lambda b, p: len(b.tf.get(p).t_stamp) if p in b.tf else 0
+        n_odom, n_map = n(b1, c.sensor.odometry_tf), n(b2, c.sensor.fix_tf)
         check("bag: IMU", len(b1.imu_t) > 1000, f"{len(b1.imu_t)} msgs in 8 s")
-        check("bag: odom->imu tf", n(b1, (fr["odin_odom"], fr["odin_imu"])) > 30, f"{n(b1, (fr['odin_odom'], fr['odin_imu']))}")
+        check("bag: odom->imu tf", n_odom > 30, f"{n_odom}")
         check("bag: point cloud (preflight path)", len(b1.cloud_n) > 20, f"{len(b1.cloud_n)} clouds, ~{sum(b1.cloud_n) // max(len(b1.cloud_n), 1)} pts")
-        check("bag: odom->map tf in relocalization", n(b2, (fr["odin_odom"], fr["odin_map"])) > 0,
-              f"{n(b2, (fr['odin_odom'], fr['odin_map']))}")
+        check("bag: odom->map tf in relocalization", n_map > 0, f"{n_map}")
         check("bag: mocap", len(b1.mocap.t_stamp) > 0, "(expected FAIL until the mocap is configured)")
         print("topics in bag:", ", ".join(sorted(b1.topics)))
     finally:

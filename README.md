@@ -5,6 +5,10 @@ on the ARUW sentry: static field ε_s, FOGM η with Student-t innovations, laten
 INIT/TRACK/LOST events. Ground truth is the already-running mocap. **Wheel encoders are never
 used.**
 
+The sensor-specific parts (driver, frames, topics) live in `odin_char/sensors/<type>/`, chosen by
+`sensor.type` in `config/campaign.yaml`; Odin is `odin_char/sensors/odin/`. To characterize another
+sensor, see [odin_char/sensors/README.md](odin_char/sensors/README.md).
+
 ## Two ways to run it (`robot.control` in `config/campaign.yaml`)
 
 * **`human` (default):** a person drives the sentry with the remote. The script starts and stops
@@ -25,7 +29,7 @@ but the static field is binned by position, so that's fine.
 scripts/setup.sh                      # once (ROS 2 + ~/odin_ws are sourced automatically)
 scripts/run_campaign.sh find-mocap    # once: paste the printed mocap: block into the config
 scripts/run_campaign.sh mocap         # check the live mocap stream (nothing moves)
-scripts/run_campaign.sh odin          # check Odin starts and publishes (nothing moves)
+scripts/run_campaign.sh sensor        # check Odin starts and publishes (nothing moves)
 scripts/run_campaign.sh day1          # follow the on-screen instructions
 scripts/run_campaign.sh day2          # later: one more Phase 2 session (and day3)
 scripts/analyze.sh                    # -> campaigns/odin1/results/report.md
@@ -90,10 +94,12 @@ it to competition.**
 
 | path | what |
 |---|---|
-| `config/campaign.yaml` | **the one file to edit**: mocap source, room, figure-8, Odin driver |
+| `config/campaign.yaml` | **the one file to edit**: mocap source, sensor, room, figure-8 |
+| `odin_char/sensors/odin/` | everything Odin: frames/topics/driver defaults (`defaults.yaml`), per-run `control_command.yaml`, map save, hardware self-test |
+| `odin_char/sensors/base.py` | the `Sensor` / `Driver` interface the campaign and analysis use |
 | `odin_char/robot/campaign.py` | the campaign: bring-up steps, all protocol phases, safety, resume |
-| `odin_char/robot/ros_io.py` | ROS 2: mocap subscriber (any source type), Odin tf/IMU watch, UDP sender |
-| `odin_char/robot/processes.py` | Odin driver (per-run config copy, log watching, map save) and `ros2 bag record` |
+| `odin_char/robot/ros_io.py` | ROS 2: mocap subscriber (any source type), sensor fix tf / heartbeat watch, UDP sender |
+| `odin_char/robot/processes.py` | `ros2 bag record` |
 | `odin_char/robot/motion.py` | trajectories, mocap-feedback controller, geofence, command-gain identification |
 | `odin_char/robot/discover.py` | `find-mocap`: lists the live mocap candidates |
 | `odin_char/mocap_config.py` | the `mocap:` config block (tf, PoseStamped, TransformStamped, Odometry) |
@@ -117,7 +123,8 @@ mocap:
 `scripts/run_campaign.sh find-mocap` listens to every topic that could carry a pose. It prints
 each one's rate, frames and arrival-minus-stamp offset, then a ready-to-paste `mocap:` block.
 
-Odin's names come from `manifoldsdk/odin_ros_driver` v0.14.4 and are already set:
+Odin's names come from `manifoldsdk/odin_ros_driver` v0.14.4 and are already set in
+`odin_char/sensors/odin/defaults.yaml` (override any of them under `sensor:` in the campaign config):
 
 * tf `odom → imu`, and `odom → map` (parent `odom`, published only in relocalization mode)
 * topics `/odin1/imu`, `/odin1/odometry`, `/odin1/cloud_raw`
@@ -132,10 +139,10 @@ copy of your `control_command.yaml`), so don't start Odin by hand.
 1. MCB:    flash aruw-mcb@odin-characterization   (cd aruw-mcb-project && scons run robot=SENTRY_ACHLYS)
 2. otto:   on the Jetson, stop otto's main loop, then  scripts/start_bridge.sh
            (or: cd project-otto && poetry run odin-characterization)
-3. this:   scripts/setup.sh                     (once; ROS 2 + odin driver workspace sourced)
+3. this:   scripts/setup.sh                     (once; ROS 2 + the sensor driver's workspace sourced)
            scripts/run_campaign.sh find-mocap   -> paste the mocap: block into config/campaign.yaml
            scripts/run_campaign.sh mocap        live pose/rate/clock, fence check (no motion)
-           scripts/run_campaign.sh odin         starts Odin 20 s, lists its topics (no motion)
+           scripts/run_campaign.sh sensor       starts Odin 20 s, lists its topics (no motion)
            scripts/run_campaign.sh jog          remote L-UP/R-MID; tiny pulses, prints motion per command
            scripts/run_campaign.sh check        identifies command -> velocity gains from mocap
 4. collect: scripts/run_campaign.sh day1        (later days: day2, day3)
@@ -148,7 +155,7 @@ Each bring-up step isolates one link of the chain:
 |---|---|
 | `find-mocap` | ROS networking or `ROS_DOMAIN_ID` |
 | `mocap` | the `mocap:` config |
-| `odin` | the Odin driver, USB, or `driver.base_config` |
+| `sensor` | the Odin driver, USB, or `sensor.driver.base_config` |
 | `jog` | otto bridge (watch its status line), UART, the MCB branch, or the remote switch |
 | `check` | gains, if they're implausible |
 
@@ -159,7 +166,7 @@ Each bring-up step isolates one link of the chain:
   least 1 m inside it.
 * `phases.phase2`: the figure-8 through the regions that matter. `phases.phase3.locations`: 3–5
   hold spots.
-* `driver.base_config`: your deployed `control_command.yaml`. It is copied per run with the map
+* `sensor.driver.base_config`: your deployed `control_command.yaml`. It is copied per run with the map
   mode, `use_host_ros_time: 2` and `devstatuslog: 1` applied; the installed file isn't changed.
 * `hand_eye_prior`: rigid body → Odin IMU from CAD (`[tx ty tz rx ry rz]`, rotation vector).
   Planar driving can't observe the vertical lever arm.
@@ -175,7 +182,7 @@ Each bring-up step isolates one link of the chain:
 
 Everything else is autonomous: calibration, SLAM map plus automatic save, session 1,
 holds, latency, 24 cold starts and outages. The protocol's 20 min thermal warm-up is disabled
-for speed (`driver.warmup_min: 0`, thermal effects ignored); set it to 20 to restore it. `--no-prompt` skips the steps that need a person.
+for speed (`sensor.warmup_min: 0`, thermal effects ignored); set it to 20 to restore it. `--no-prompt` skips the steps that need a person.
 After an abort, rerun the same command: finished steps are skipped (`--redo` repeats them).
 `day2` and `day3` each add one Phase 2 session.
 

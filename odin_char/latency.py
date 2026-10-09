@@ -7,7 +7,7 @@ import numpy as np
 from scipy.optimize import minimize_scalar
 
 from .bagio import BagData
-from .errors import Calibration, ErrorTable, odin_map_pose
+from .errors import Calibration, ErrorTable
 from .se3 import yaw_of
 
 
@@ -86,10 +86,10 @@ class XcorrLatency:
 
 
 def xcorr_latency(
-    bag: BagData, frames: dict, calib: Calibration, use_arrival: bool = False, max_lag: float = 0.3
+    bag: BagData, sensor, calib: Calibration, use_arrival: bool = False, max_lag: float = 0.3
 ) -> XcorrLatency:
-    """Phase 4: shift truth to best match Odin (position along the dominant motion axis, and yaw)."""
-    t_est, T_MI, has_map, _ = odin_map_pose(bag, frames, use_arrival)
+    """Phase 4: shift truth to best match the sensor (position along the dominant motion axis, and yaw)."""
+    t_est, T_MI, has_map, _ = sensor.map_pose(bag, use_arrival)
     if not use_arrival:
         t_est = t_est + calib.time_offset
     t_est, T_MI = t_est[has_map], T_MI[has_map]

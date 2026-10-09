@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Data collection. Run on the robot computer with ROS 2 and the Odin driver workspace sourced.
+# Data collection. Run on the robot computer with ROS 2 (the sensor's driver workspace is sourced
+# from odin_char/sensors/<type>/env.sh).
 #
 # robot.control in config/campaign.yaml picks human driving (default: you drive with the remote,
 # the script guides and records) or autonomous driving (needs otto's mode + the MCB branch).
@@ -8,7 +9,7 @@
 # autonomous mode):
 #   scripts/run_campaign.sh find-mocap          list live mocap candidates -> paste into config
 #   scripts/run_campaign.sh mocap  [dir]        watch the configured mocap stream
-#   scripts/run_campaign.sh odin   [dir]        start/stop Odin, report its topics
+#   scripts/run_campaign.sh sensor [dir]        start/stop the sensor's driver, report its topics
 #   scripts/run_campaign.sh jog    [dir]        tiny pulses: does the robot move the right way?
 #   scripts/run_campaign.sh check  [dir]        identify command gains from mocap
 #
@@ -21,14 +22,14 @@
 # dir defaults to campaigns/odin1. Extra flags pass through (--no-prompt, --redo, --skip-warmup).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-STEP=${1:?usage: run_campaign.sh <find-mocap|mocap|odin|jog|check|day1|day2|day3|step> [campaign_dir] [flags]}
+STEP=${1:?usage: run_campaign.sh <find-mocap|mocap|sensor|jog|check|day1|day2|day3|step> [campaign_dir] [flags]}
 shift
-# ROS 2 + the workspace with odin_ros_driver (ODIN_WS, default ~/odin_ws)
+# ROS 2 + the sensor driver's workspace
 set +u
 command -v ros2 >/dev/null || source /opt/ros/${ROS_DISTRO:-humble}/setup.bash
-ros2 pkg prefix odin_ros_driver >/dev/null 2>&1 || source "${ODIN_WS:-$HOME/odin_ws}/install/setup.bash"
+source scripts/sensor_env.sh
 set -u
-ros2 pkg prefix odin_ros_driver >/dev/null 2>&1 || { echo "odin_ros_driver not found: set ODIN_WS to its workspace" >&2; exit 1; }
+sensor_env_check || exit 1
 if [ "$STEP" = "find-mocap" ]; then
     exec .venv/bin/python -m odin_char.robot.discover "$@"
 fi

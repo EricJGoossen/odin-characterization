@@ -1,8 +1,8 @@
-"""Phase 2 analysis steps 1-2: compose Odin's map-frame pose and compute body-aligned error.
+"""Phase 2 analysis steps 1-2: the sensor's map-frame pose (Sensor.map_pose) against mocap truth,
+as body-aligned error.
 
-Frames: W mocap world, K mocap rigid body (base_link), I Odin IMU, O Odin odom, M Odin map.
-Odin publishes odom->map with parent `odom` and child `map`, i.e. T_OM (the pose of the map
-frame in odom) -- the *inverse* of ROS's usual map->odom. Hence T_MI = T_OM^-1 @ T_OI.
+Frames: W mocap world, K mocap rigid body (base_link), I the sensor's body frame (its IMU for
+Odin), M the sensor's map frame.
 """
 from __future__ import annotations
 
@@ -18,26 +18,9 @@ AXES = ["along", "cross", "vertical", "roll", "pitch", "yaw"]
 
 @dataclass
 class Calibration:
-    time_offset: float  # mocap_time = odin_stamp + time_offset
+    time_offset: float  # mocap_time = sensor_stamp + time_offset
     X: Pose  # T_KI
     T_WM: Pose | None = None
-
-
-def odin_map_pose(bag: BagData, frames: dict, use_arrival: bool = False):
-    """T_MI at every odom->imu sample, holding the latest odom->map (zero-order hold).
-    Returns (t, T_MI, has_map, map_age)."""
-    odom_imu = bag.tf_series(frames["odin_odom"], frames["odin_imu"], use_arrival)
-    try:
-        odom_map = bag.tf_series(frames["odin_odom"], frames["odin_map"], use_arrival)
-    except KeyError:
-        n = len(odom_imu)
-        return odom_imu.t, odom_imu.pose, np.zeros(n, bool), np.full(n, np.inf)
-    T_OM, has_map, age = odom_map.zoh(odom_imu.t)
-    if frames.get("odom_map_is_ros_convention", False):
-        # driver publishes map->odom the ROS way: the stream is T_MO, so T_OM is its inverse
-        T_OM = T_OM.inv()
-    T_MI = T_OM.inv() @ odom_imu.pose
-    return odom_imu.t, T_MI, has_map, np.where(has_map, age, np.inf)
 
 
 @dataclass
@@ -47,7 +30,7 @@ class ErrorTable:
     pos_M: np.ndarray  # true position in map frame
     speed: np.ndarray  # horizontal speed (m/s)
     yaw_rate: np.ndarray  # rad/s
-    map_age: np.ndarray  # age of held odom->map (s)
+    map_age: np.ndarray  # age of the held registration (odom->map) (s)
     heading: np.ndarray  # track-frame heading in the map frame (rad)
     est_M: Pose
     true_M: Pose
@@ -131,7 +114,7 @@ def pose_error(est: Pose, true: Pose, heading: np.ndarray) -> np.ndarray:
 
 def compute_errors(
     bag: BagData,
-    frames: dict,
+    sensor,
     calib: Calibration,
     run_id: int,
     meta: dict,
@@ -142,7 +125,7 @@ def compute_errors(
     min_speed_for_track: float = 0.05,
 ) -> ErrorTable:
     assert calib.T_WM is not None, "T_WM must be fitted before computing errors"
-    t_est, T_MI, has_map, map_age = odin_map_pose(bag, frames, use_arrival)
+    t_est, T_MI, has_map, map_age = sensor.map_pose(bag, use_arrival)
     if not use_arrival:
         t_est = t_est + calib.time_offset
     mocap = bag.mocap_series()
