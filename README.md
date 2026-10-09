@@ -9,6 +9,10 @@ The sensor-specific parts (driver, frames, topics) live in `odin_char/sensors/<t
 `sensor.type` in `config/campaign.yaml`; Odin is `odin_char/sensors/odin/`. To characterize another
 sensor, see [odin_char/sensors/README.md](odin_char/sensors/README.md).
 
+**LD19 2D lidar** (WayPonDEV FHL-LD19): a separate quick procedure without mocap. Push the robot
+around while a live SLAM map builds in rviz2, then get scan noise, dropouts, ghost points, spin smear
+and the map: `scripts/ld19.sh check | static | map | analyze` (details: `python -m odin_char.sensors.ld19 --help`).
+
 ## Two ways to run it (`robot.control` in `config/campaign.yaml`)
 
 * **`human` (default):** a person drives the sentry with the remote. The script starts and stops

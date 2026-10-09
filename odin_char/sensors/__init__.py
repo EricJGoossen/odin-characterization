@@ -82,4 +82,7 @@ def load_sensor(cfg: dict) -> Sensor:
         if e.name != f"{__name__}.{block['type']}":
             raise
         raise ValueError(f"unknown sensor.type {block['type']!r}: no package odin_char/sensors/{block['type']}/") from e
+    if not hasattr(mod, "SENSOR"):
+        raise ValueError(f"{block['type']} is not a pose sensor, so it doesn't use the mocap campaign: "
+                         f"see python -m odin_char.sensors.{block['type']} --help")
     return mod.SENSOR(block)

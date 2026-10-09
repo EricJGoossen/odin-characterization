@@ -1,0 +1,80 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Help Height: 0
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid (1 m)
+      Enabled: true
+      Reference Frame: <Fixed Frame>
+      Cell Size: 1
+      Plane Cell Count: 30
+      Color: 100; 100; 100
+    - Class: rviz_default_plugins/Map
+      Name: Map
+      Enabled: true
+      Alpha: 0.85
+      Color Scheme: map
+      Topic:
+        Value: /map
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/LaserScan
+      Name: Scan
+      Enabled: true
+      Style: Points
+      Size (Pixels): 3
+      Size (m): 0.03
+      Color Transformer: FlatColor
+      Color: 255; 60; 60
+      Decay Time: 0
+      Topic:
+        Value: /scan
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+    - Class: rviz_default_plugins/Odometry
+      Name: Path (rf2o)
+      Enabled: true
+      Keep: 2000
+      Position Tolerance: 0.05
+      Angle Tolerance: 0.2
+      Shape:
+        Value: Axes
+        Axes Length: 0.15
+        Axes Radius: 0.01
+      Covariance:
+        Value: false
+      Topic:
+        Value: /odom_rf2o
+        Depth: 5
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+      Marker Scale: 0.5
+  Enabled: true
+  Global Options:
+    Fixed Frame: map
+    Background Color: 40; 40; 40
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Target Frame: base_laser
+      Scale: 60
+      X: 0
+      Y: 0
+Window Geometry:
+  Width: 1200
+  Height: 900

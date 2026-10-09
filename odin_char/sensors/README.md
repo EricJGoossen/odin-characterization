@@ -76,5 +76,8 @@ The campaign uses three driver modes (`Mode` in base.py): odometry for preflight
 mapping for the `map` step, and relocalization for everything that is scored. A sensor without a
 prior-map mode cannot run the map, session and init steps as they stand.
 
+Scan sensors that give no pose don't fit this interface: [ld19/](ld19/) is the 2D lidar, with its
+own procedure and analysis (`python -m odin_char.sensors.ld19 --help`), no `SENSOR` and no mocap.
+
 [odin/](odin/) is the worked example: a `TfSensor` plus a driver that rewrites `control_command.yaml`
 per run, saves maps over a ROS service and reads the device serial.
